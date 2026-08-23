@@ -35,11 +35,39 @@ FastAPI application, internally organized into modules by domain concern.
   endpoint (`GET /health`), configuration via `pydantic-settings`
   (`app/core/config.py`), and a SQLAlchemy engine/session setup
   (`app/db/session.py`) with Alembic wired to the same configuration
-  (`alembic/env.py`). No domain models or migrations exist yet.
+  (`alembic/env.py`).
+- **Merchant catalog module** (`app/catalog/`) — the first domain module:
+  - **Models** (`models.py`): `Merchant` and `Product`, with `Product`
+    belonging to exactly one `Merchant`. Money is stored as an integer count
+    of the currency's minor units, never as a float — see
+    [`docs/decisions/0002-money-as-integer-minor-units.md`](docs/decisions/0002-money-as-integer-minor-units.md).
+    Availability (`Product.is_available`) is derived deterministically from
+    stored state (`active`, `stock_quantity`, and the owning merchant's
+    `active` flag) rather than tracked as separate mutable state.
+  - **Migration**: `alembic/versions/` contains the migration creating the
+    `merchants` and `products` tables, with foreign key, uniqueness (slug per
+    merchant table, SKU per merchant), and check constraints
+    (non-negative price/stock, well-formed currency code) enforced at the
+    database level.
+  - **Schemas** (`schemas.py`): `ProductCatalogView` is the agent-readable
+    catalog representation — product identity, description, price/currency,
+    availability, and embedded merchant identity in one response, so a
+    consumer never needs a second lookup to evaluate a candidate product.
+  - **API** (`router.py`), under `/api/catalog`: merchant-agnostic product
+    search (`GET /api/catalog/products`, the AI buyer's discovery entry
+    point — searches across every merchant) and the same search scoped to one
+    merchant (`GET /api/catalog/merchants/{slug}/products`), both with `q`,
+    `in_stock_only`, `include_inactive`, `limit`/`offset`, and a total match
+    count; retrieve a single product (`GET /api/catalog/products/{id}`); and
+    list/retrieve merchants (`GET /api/catalog/merchants`,
+    `GET /api/catalog/merchants/{slug}`).
+  - **Seed data** (`seed.py`): a small, deterministic demo catalog (two
+    merchants, six products, including one out-of-stock and one inactive
+    product) for local development — not used by the test suite.
 - **Frontend skeleton** (`frontend/`): a Next.js (App Router, TypeScript,
   Tailwind CSS) application with a minimal shell page that calls the backend's
   `/health` endpoint through a small API client (`src/lib/api.ts`) to confirm
-  connectivity.
+  connectivity. It does not yet call the catalog API.
 - **Local development infrastructure**: `docker-compose.yml` providing a
   PostgreSQL instance for local development. The backend and frontend
   applications run natively against it.
@@ -52,8 +80,6 @@ FastAPI application, internally organized into modules by domain concern.
 The following are part of the intended product but do not exist yet. They will
 be added incrementally, each behind its own scoped change:
 
-- **Merchant catalog module** — structured product discovery interface that an
-  AI buyer can query.
 - **Cart and checkout workflow** — cart creation and checkout initiation as
   explicit, auditable state.
 - **Transaction state machine** — deterministic modeling of a transaction's

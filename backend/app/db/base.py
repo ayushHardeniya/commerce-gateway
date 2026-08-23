@@ -1,0 +1,6 @@
+"""Imports every ORM model so Base.metadata is complete for Alembic autogenerate."""
+
+from app.catalog.models import Merchant, Product  # noqa: F401
+from app.db.session import Base
+
+__all__ = ["Base"]

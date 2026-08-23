@@ -4,7 +4,7 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from app.core.config import get_settings
-from app.db.session import Base
+from app.db.base import Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -15,7 +15,11 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+# A caller (e.g. the test suite, pointing at an ephemeral database) may have
+# already set sqlalchemy.url on this Config object; only fall back to the
+# application's own settings when nothing more specific was provided.
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
