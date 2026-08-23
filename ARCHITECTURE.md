@@ -64,6 +64,32 @@ FastAPI application, internally organized into modules by domain concern.
   - **Seed data** (`seed.py`): a small, deterministic demo catalog (two
     merchants, six products, including one out-of-stock and one inactive
     product) for local development — not used by the test suite.
+- **Agent tool layer** (`app/agents/`) — the structured interface a future AI
+  buyer will act through. See
+  [`docs/decisions/0004-agent-tool-contract.md`](docs/decisions/0004-agent-tool-contract.md)
+  for the full reasoning; in short:
+  - **Contract** (`agents/tools/base.py`): a provider-neutral `Tool` base
+    class — explicit `name`/`description`, a typed Pydantic input schema, a
+    typed output schema, and a single `run()` entry point that validates
+    input, executes deterministically, and always returns a structured
+    `ToolResult` (`output` or a typed `ToolError` with a closed
+    `ToolErrorCode` — `invalid_input` / `not_found` / `internal_error`).
+    `run()` never raises, and no vendor SDK is referenced anywhere in this
+    layer.
+  - **Catalog tools** (`agents/tools/catalog.py`): `search_catalog` and
+    `get_product`, thin deterministic wrappers over
+    `app.catalog.repository` (the same functions the HTTP API calls) —
+    reusing `ProductCatalogView`/`ProductPage` as their output, so the agent
+    and the HTTP API can never see different availability/filtering
+    semantics. No HTTP calls back into our own API, no ranking or semantic
+    search, no LLM calls inside a tool.
+  - **Dependency direction**: `app.agents` may depend on `app.catalog`;
+    nothing in `app.catalog` (or any other domain module) may depend on
+    `app.agents`. This is enforced by a static import check in
+    `backend/tests/agents/test_architecture.py`, not just convention.
+  - Not yet built: the agent loop that actually calls an LLM with these
+    tools, and any provider adapter (Gemini or otherwise) — see "Planned"
+    below.
 - **Frontend skeleton** (`frontend/`): a Next.js (App Router, TypeScript,
   Tailwind CSS) application with a minimal shell page that calls the backend's
   `/health` endpoint through a small API client (`src/lib/api.ts`) to confirm
@@ -96,9 +122,11 @@ be added incrementally, each behind its own scoped change:
 - **Audit trail** — a complete, queryable record of every step a transaction
   went through, sufficient to explain any money-moving decision after the
   fact.
-- **AI buyer agent** — natural-language request understanding and product
-  selection reasoning, implemented with an LLM using structured tool/function
-  calling against the catalog and cart APIs.
+- **AI buyer agent** — the conversational loop that understands a
+  natural-language shopping request and calls the tools in `app/agents/tools`
+  (and future cart/checkout tools) to act on it, plus a concrete LLM provider
+  adapter (e.g. Gemini) behind the provider-neutral tool contract described
+  above.
 
 ## Determinism boundary
 
