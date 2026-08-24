@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/commerce_gateway"
 
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.5-flash"
+
 
 @lru_cache
 def get_settings() -> Settings:

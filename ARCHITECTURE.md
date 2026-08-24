@@ -87,9 +87,29 @@ FastAPI application, internally organized into modules by domain concern.
     nothing in `app.catalog` (or any other domain module) may depend on
     `app.agents`. This is enforced by a static import check in
     `backend/tests/agents/test_architecture.py`, not just convention.
-  - Not yet built: the agent loop that actually calls an LLM with these
-    tools, and any provider adapter (Gemini or otherwise) — see "Planned"
-    below.
+  - **Gemini adapter** (`agents/gemini_client.py`) — the only file that
+    imports `google.genai`. Builds a configured client from
+    `GEMINI_API_KEY`/`GEMINI_MODEL` (`app/core/config.py`) and translates
+    each `Tool`'s Pydantic input schema into Gemini's native
+    function-declaration format. Gemini is the current AI reasoning
+    component; nothing outside this one module is Gemini-specific.
+  - **Agent loop** (`agents/buyer.py`, `AIBuyerService`): accepts one user
+    message, sends it to Gemini together with the declared catalog tools,
+    and on each function call Gemini proposes, validates and executes it
+    through the `Tool` contract and returns the structured result to Gemini
+    — repeating for at most a small, fixed number of model turns
+    (`max_tool_iterations`, default 4) before failing clearly rather than
+    looping indefinitely. Gemini is only ever given `search_catalog` and
+    `get_product`: it has no path to carts, inventory, pricing, policy,
+    authorization, or payment execution, because those simply are not
+    declared tools — not because of a runtime permission check that could
+    be misconfigured.
+  - **API** (`agents/router.py`): `POST /api/agent/chat` — a typed
+    (`AgentChatRequest`/`AgentChatResponse`) endpoint for exercising the
+    loop; not a production chat UI and holds no conversation history across
+    requests. Missing Gemini configuration, a Gemini/API failure, and
+    iteration-limit exhaustion each surface as a distinct HTTP error
+    (503/502/422) rather than a fabricated reply.
 - **Frontend skeleton** (`frontend/`): a Next.js (App Router, TypeScript,
   Tailwind CSS) application with a minimal shell page that calls the backend's
   `/health` endpoint through a small API client (`src/lib/api.ts`) to confirm
@@ -122,11 +142,12 @@ be added incrementally, each behind its own scoped change:
 - **Audit trail** — a complete, queryable record of every step a transaction
   went through, sufficient to explain any money-moving decision after the
   fact.
-- **AI buyer agent** — the conversational loop that understands a
-  natural-language shopping request and calls the tools in `app/agents/tools`
-  (and future cart/checkout tools) to act on it, plus a concrete LLM provider
-  adapter (e.g. Gemini) behind the provider-neutral tool contract described
-  above.
+- **AI buyer, beyond catalog discovery** — the agent loop exists today only
+  for catalog search/lookup. Acting on a request (creating a cart, checking
+  out) requires the corresponding domain module and tools to exist first,
+  and is not implemented yet. Multi-turn conversation history across
+  requests is also not implemented — each `POST /api/agent/chat` call is
+  independent.
 
 ## Determinism boundary
 

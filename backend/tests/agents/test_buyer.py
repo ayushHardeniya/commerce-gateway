@@ -1,0 +1,274 @@
+import uuid
+
+import httpx
+import pytest
+from google.genai.errors import APIError
+from sqlalchemy.orm import Session
+
+from app.agents.buyer import (
+    AgentConfigurationError,
+    AgentIterationLimitExceeded,
+    AgentProviderError,
+    AIBuyerService,
+)
+from app.catalog.models import Merchant, Product
+from app.core.config import Settings
+from tests.agents.fakes import (
+    FakeGeminiClient,
+    blocked_response,
+    empty_response,
+    function_call_response,
+    parallel_function_call_response,
+    text_response,
+)
+
+
+def _service(db_session: Session, responses, **kwargs) -> AIBuyerService:
+    return AIBuyerService(
+        db_session,
+        settings=Settings(_env_file=None, gemini_api_key="test-key"),
+        client=FakeGeminiClient(responses),
+        **kwargs,
+    )
+
+
+# --- final response with no tool calls ---
+
+
+def test_chat_returns_final_text_when_no_tool_call_is_made(db_session: Session) -> None:
+    service = _service(db_session, [text_response("Hello! How can I help you shop today?")])
+
+    result = service.chat("hi")
+
+    assert result.reply == "Hello! How can I help you shop today?"
+    assert result.tool_calls == []
+
+
+# --- single tool call ---
+
+
+def test_chat_executes_a_search_catalog_tool_call(db_session: Session, merchant: Merchant) -> None:
+    db_session.add(
+        Product(
+            merchant_id=merchant.id,
+            sku="SKU-1",
+            name="Wireless Headphones",
+            price_minor_units=4999,
+            currency="USD",
+            stock_quantity=5,
+        )
+    )
+    db_session.flush()
+
+    service = _service(
+        db_session,
+        [
+            function_call_response("search_catalog", {"query": "headphones"}),
+            text_response("I found Wireless Headphones for you."),
+        ],
+    )
+
+    result = service.chat("Find me wireless headphones")
+
+    assert result.reply == "I found Wireless Headphones for you."
+    assert len(result.tool_calls) == 1
+    call = result.tool_calls[0]
+    assert call.tool_name == "search_catalog"
+    assert call.ok is True
+    assert call.output["total"] == 1
+
+
+def test_chat_sends_tool_result_back_to_gemini(db_session: Session, merchant: Merchant) -> None:
+    fake = FakeGeminiClient(
+        [
+            function_call_response("search_catalog", {}),
+            text_response("Done."),
+        ]
+    )
+    service = AIBuyerService(
+        db_session, settings=Settings(_env_file=None, gemini_api_key="test-key"), client=fake
+    )
+
+    service.chat("anything in stock?")
+
+    assert len(fake.models.calls) == 2
+    second_call_contents = fake.models.calls[1]["contents"]
+    # model's function-call turn, then our function-response turn appended.
+    function_response_part = second_call_contents[-1].parts[0]
+    assert function_response_part.function_response.name == "search_catalog"
+    assert "result" in function_response_part.function_response.response
+
+
+# --- multiple tool calls across turns ---
+
+
+def test_chat_executes_multiple_tool_calls_in_one_conversation(
+    db_session: Session, merchant: Merchant, product: Product
+) -> None:
+    service = _service(
+        db_session,
+        [
+            function_call_response("search_catalog", {"query": "widget"}),
+            function_call_response("get_product", {"product_id": str(product.id)}),
+            text_response("The Widget is in stock."),
+        ],
+    )
+
+    result = service.chat("Tell me about the widget in detail")
+
+    assert result.reply == "The Widget is in stock."
+    assert [call.tool_name for call in result.tool_calls] == ["search_catalog", "get_product"]
+    assert all(call.ok for call in result.tool_calls)
+
+
+def test_chat_executes_parallel_tool_calls_in_a_single_turn(
+    db_session: Session, merchant: Merchant, product: Product
+) -> None:
+    service = _service(
+        db_session,
+        [
+            parallel_function_call_response(
+                [
+                    ("search_catalog", {"query": "widget"}),
+                    ("get_product", {"product_id": str(product.id)}),
+                ]
+            ),
+            text_response("Here's what I found."),
+        ],
+    )
+
+    result = service.chat("Look up the widget two ways")
+
+    assert len(result.tool_calls) == 2
+    assert {call.tool_name for call in result.tool_calls} == {"search_catalog", "get_product"}
+
+
+# --- tool errors ---
+
+
+def test_chat_propagates_tool_not_found_error_and_lets_model_recover(
+    db_session: Session,
+) -> None:
+    missing_id = str(uuid.uuid4())
+    service = _service(
+        db_session,
+        [
+            function_call_response("get_product", {"product_id": missing_id}),
+            text_response("I couldn't find that product."),
+        ],
+    )
+
+    result = service.chat(f"Tell me about product {missing_id}")
+
+    assert result.reply == "I couldn't find that product."
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].ok is False
+    assert result.tool_calls[0].error_code == "not_found"
+
+
+def test_chat_propagates_malformed_tool_arguments_as_invalid_input(
+    db_session: Session,
+) -> None:
+    service = _service(
+        db_session,
+        [
+            function_call_response("search_catalog", {"limit": "not-a-number"}),
+            text_response("Let me try a valid search."),
+        ],
+    )
+
+    result = service.chat("search please")
+
+    assert result.tool_calls[0].ok is False
+    assert result.tool_calls[0].error_code == "invalid_input"
+
+
+def test_chat_rejects_calls_to_tools_outside_the_declared_set(db_session: Session) -> None:
+    """The safety boundary: a call to anything not an explicit catalog tool is
+    never executed — it's fed back as a structured error, never run."""
+    service = _service(
+        db_session,
+        [
+            function_call_response("create_cart", {}),
+            text_response("I can't do that yet, but I can help you search the catalog."),
+        ],
+    )
+
+    result = service.chat("create a cart and check out")
+
+    assert result.tool_calls[0].tool_name == "create_cart"
+    assert result.tool_calls[0].ok is False
+    assert result.tool_calls[0].error_code == "unknown_tool"
+
+
+# --- iteration limit ---
+
+
+def test_chat_raises_when_iteration_limit_is_exhausted(db_session: Session) -> None:
+    fake = FakeGeminiClient([function_call_response("search_catalog", {}) for _ in range(5)])
+    service = AIBuyerService(
+        db_session,
+        settings=Settings(_env_file=None, gemini_api_key="test-key"),
+        client=fake,
+        max_tool_iterations=2,
+    )
+
+    with pytest.raises(AgentIterationLimitExceeded):
+        service.chat("keep searching forever")
+
+    assert len(fake.models.calls) == 2
+
+
+# --- configuration ---
+
+
+def test_chat_raises_configuration_error_without_api_key(db_session: Session) -> None:
+    service = AIBuyerService(db_session, settings=Settings(_env_file=None, gemini_api_key=None))
+
+    with pytest.raises(AgentConfigurationError):
+        service.chat("hello")
+
+
+# --- provider/transport failures ---
+
+
+def test_chat_wraps_gemini_api_error_as_provider_error(db_session: Session) -> None:
+    api_error = APIError(503, {"error": {"message": "service unavailable"}})
+    service = _service(db_session, [api_error])
+
+    with pytest.raises(AgentProviderError):
+        service.chat("find me headphones")
+
+
+def test_chat_wraps_transport_connect_error_as_provider_error(db_session: Session) -> None:
+    """Proves the C1 fix: a raw httpx transport failure — which the
+    google-genai SDK's own retry logic re-raises as-is rather than wrapping
+    in APIError once retries are exhausted — must still surface as a clean
+    AgentProviderError, not an unhandled exception."""
+    service = _service(db_session, [httpx.ConnectError("connection refused")])
+
+    with pytest.raises(AgentProviderError):
+        service.chat("find me headphones")
+
+
+def test_chat_wraps_transport_timeout_as_provider_error(db_session: Session) -> None:
+    service = _service(db_session, [httpx.TimeoutException("request timed out")])
+
+    with pytest.raises(AgentProviderError):
+        service.chat("find me headphones")
+
+
+def test_chat_raises_provider_error_when_no_candidates_are_returned(db_session: Session) -> None:
+    service = _service(db_session, [empty_response()])
+
+    with pytest.raises(AgentProviderError):
+        service.chat("find me headphones")
+
+
+def test_chat_raises_provider_error_when_final_response_has_no_usable_text(
+    db_session: Session,
+) -> None:
+    service = _service(db_session, [blocked_response()])
+
+    with pytest.raises(AgentProviderError):
+        service.chat("find me headphones")
