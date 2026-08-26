@@ -64,6 +64,47 @@ FastAPI application, internally organized into modules by domain concern.
   - **Seed data** (`seed.py`): a small, deterministic demo catalog (two
     merchants, six products, including one out-of-stock and one inactive
     product) for local development — not used by the test suite.
+- **Commerce module** (`app/commerce/`) — cart and checkout, built on top of
+  the catalog. See
+  [`docs/decisions/0005-cart-price-snapshot.md`](docs/decisions/0005-cart-price-snapshot.md)
+  for the full reasoning; in short:
+  - **Cart** (`commerce/cart/`): a `Cart` belongs to one merchant and holds
+    `CartItem` line items that reference a `Product` by id rather than
+    copying it. Each item snapshots `unit_price_minor_units` at add-time —
+    a later catalog price change never silently changes what a cart shows.
+    A cart commits to one currency (the first item's) and rejects a product
+    priced in a different one. `Cart.subtotal_minor_units` is the single
+    deterministic definition of a cart's total
+    (`sum(unit_price_minor_units × quantity)`); nothing recomputes it
+    differently elsewhere, and no LLM is ever asked to calculate or approve
+    it. Availability is checked when an item is added, not on every later
+    read — there is no inventory reservation.
+  - **Checkout** (`commerce/checkout/`): `create_checkout` is the one place
+    a cart gets revalidated against current catalog state — every product
+    must still be available, and every snapshotted price must still match
+    the product's current price — before a `Checkout` freezes a
+    deterministic total. Either check failing returns a structured,
+    listable `product_unavailable`/`price_changed` condition instead of
+    silently using the new price. A `Checkout` denormalizes its own line
+    items (`CheckoutItem`: product name/sku/price) independently of the
+    live product row, so it stays a complete, readable record even if a
+    product is later edited or deleted. `status` is `active` / `completed`
+    / `cancelled` in the database; `expired` is a derived read
+    (`Checkout.effective_status`) once `expires_at` has passed, the same
+    computed-from-stored-state pattern as `Product.is_available` — no
+    background job flips it. No payment or authorization happens anywhere
+    in this module; a checkout only ever prepares for one.
+  - **API**: `POST /api/carts`, `GET /api/carts/{id}`,
+    `POST /api/carts/{id}/items`, `PATCH /api/carts/{id}/items/{item_id}`,
+    `DELETE /api/carts/{id}/items/{item_id}`; `POST /api/checkouts`,
+    `GET /api/checkouts/{id}`. Structured errors
+    (`app/commerce/errors.py`) carry a machine-readable `code` (e.g.
+    `cart_not_found`, `product_unavailable`, `price_changed`,
+    `invalid_cart_state`) alongside a human-readable message, mapped to the
+    appropriate HTTP status — the same `{code, message}` shape the agent
+    tool contract already uses, not a second error framework.
+  - **Dependency direction**: `app.commerce` may depend on `app.catalog`;
+    nothing in `app.catalog` depends on `app.commerce`.
 - **Agent tool layer** (`app/agents/`) — the structured interface a future AI
   buyer will act through. See
   [`docs/decisions/0004-agent-tool-contract.md`](docs/decisions/0004-agent-tool-contract.md)
@@ -83,6 +124,16 @@ FastAPI application, internally organized into modules by domain concern.
     and the HTTP API can never see different availability/filtering
     semantics. No HTTP calls back into our own API, no ranking or semantic
     search, no LLM calls inside a tool.
+  - **Commerce tools** (`agents/tools/commerce.py`): `create_cart`,
+    `get_cart`, `add_cart_item`, `update_cart_item_quantity`,
+    `remove_cart_item`, `create_checkout` — each a thin wrapper over
+    `app.commerce.cart.service` / `app.commerce.checkout.service`, the same
+    functions the HTTP API calls. A tool never computes a total, decides a
+    price, or touches a repository/database directly; every business rule
+    (availability, price-snapshot revalidation, deterministic totals) lives
+    in those services. Gemini has no tool for payment, authorization, or
+    policy because none exists yet — enforced by omission, not a runtime
+    check.
   - **Dependency direction**: `app.agents` may depend on `app.catalog`;
     nothing in `app.catalog` (or any other domain module) may depend on
     `app.agents`. This is enforced by a static import check in
@@ -99,11 +150,11 @@ FastAPI application, internally organized into modules by domain concern.
     through the `Tool` contract and returns the structured result to Gemini
     — repeating for at most a small, fixed number of model turns
     (`max_tool_iterations`, default 4) before failing clearly rather than
-    looping indefinitely. Gemini is only ever given `search_catalog` and
-    `get_product`: it has no path to carts, inventory, pricing, policy,
-    authorization, or payment execution, because those simply are not
-    declared tools — not because of a runtime permission check that could
-    be misconfigured.
+    looping indefinitely. Gemini is only ever given the catalog and
+    commerce tools above (`app.agents.tools.DEFAULT_TOOLS`): it has no path
+    to inventory mutation, pricing, policy, authorization, or payment
+    execution, because those simply are not declared tools — not because
+    of a runtime permission check that could be misconfigured.
   - **API** (`agents/router.py`): `POST /api/agent/chat` — a typed
     (`AgentChatRequest`/`AgentChatResponse`) endpoint for exercising the
     loop; not a production chat UI and holds no conversation history across
@@ -126,8 +177,6 @@ FastAPI application, internally organized into modules by domain concern.
 The following are part of the intended product but do not exist yet. They will
 be added incrementally, each behind its own scoped change:
 
-- **Cart and checkout workflow** — cart creation and checkout initiation as
-  explicit, auditable state.
 - **Transaction state machine** — deterministic modeling of a transaction's
   lifecycle (created → policy-checked → authorized → paid → completed, with
   failure/rollback paths).
@@ -142,12 +191,11 @@ be added incrementally, each behind its own scoped change:
 - **Audit trail** — a complete, queryable record of every step a transaction
   went through, sufficient to explain any money-moving decision after the
   fact.
-- **AI buyer, beyond catalog discovery** — the agent loop exists today only
-  for catalog search/lookup. Acting on a request (creating a cart, checking
-  out) requires the corresponding domain module and tools to exist first,
-  and is not implemented yet. Multi-turn conversation history across
-  requests is also not implemented — each `POST /api/agent/chat` call is
-  independent.
+- **AI buyer, beyond cart/checkout preparation** — the agent loop can
+  discover products and prepare a cart/checkout, but has no tool for
+  policy, authorization, or payment, because those domains don't exist yet.
+  Multi-turn conversation history across requests is also not implemented
+  — each `POST /api/agent/chat` call is independent.
 
 ## Determinism boundary
 

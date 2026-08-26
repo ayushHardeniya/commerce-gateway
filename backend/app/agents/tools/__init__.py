@@ -1,26 +1,54 @@
 """Tools available to the AI buyer.
 
-A tool is the only channel through which the (not yet built) agent loop can
-read or affect catalog state: the LLM proposes a call by name with JSON
+A tool is the only channel through which the agent loop can read or affect
+catalog/cart/checkout state: the LLM proposes a call by name with JSON
 input, this layer validates it against a typed schema and executes it
 deterministically, and returns a typed, structured `ToolResult` — never a
 raw exception, a database handle, or free-form code execution.
 
-`CATALOG_TOOLS` is a plain tuple, not a plugin registry: adding a tool means
-implementing a `Tool` subclass and listing it here, nothing more.
+`DEFAULT_TOOLS` is a plain tuple, not a plugin registry: adding a tool means
+implementing a `Tool` subclass and listing it in the relevant tuple below,
+nothing more.
 """
 
 from app.agents.tools.base import Tool, ToolError, ToolErrorCode, ToolResult
 from app.agents.tools.catalog import GetProductTool, SearchCatalogTool
+from app.agents.tools.commerce import (
+    AddCartItemTool,
+    CreateCartTool,
+    CreateCheckoutTool,
+    GetCartTool,
+    RemoveCartItemTool,
+    UpdateCartItemQuantityTool,
+)
 
 CATALOG_TOOLS: tuple[type[Tool], ...] = (SearchCatalogTool, GetProductTool)
 
+COMMERCE_TOOLS: tuple[type[Tool], ...] = (
+    CreateCartTool,
+    GetCartTool,
+    AddCartItemTool,
+    UpdateCartItemQuantityTool,
+    RemoveCartItemTool,
+    CreateCheckoutTool,
+)
+
+DEFAULT_TOOLS: tuple[type[Tool], ...] = CATALOG_TOOLS + COMMERCE_TOOLS
+
 __all__ = [
     "CATALOG_TOOLS",
+    "COMMERCE_TOOLS",
+    "DEFAULT_TOOLS",
+    "AddCartItemTool",
+    "CreateCartTool",
+    "CreateCheckoutTool",
+    "GetCartTool",
     "GetProductTool",
+    "RemoveCartItemTool",
     "SearchCatalogTool",
     "Tool",
     "ToolError",
     "ToolErrorCode",
     "ToolResult",
+    "UpdateCartItemQuantityTool",
 ]

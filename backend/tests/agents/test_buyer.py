@@ -184,19 +184,20 @@ def test_chat_propagates_malformed_tool_arguments_as_invalid_input(
 
 
 def test_chat_rejects_calls_to_tools_outside_the_declared_set(db_session: Session) -> None:
-    """The safety boundary: a call to anything not an explicit catalog tool is
-    never executed — it's fed back as a structured error, never run."""
+    """The safety boundary: a call to anything not an explicit tool — payment
+    and authorization above all — is never executed, only fed back as a
+    structured error. No such tool exists to smuggle in via a lucky name."""
     service = _service(
         db_session,
         [
-            function_call_response("create_cart", {}),
-            text_response("I can't do that yet, but I can help you search the catalog."),
+            function_call_response("authorize_payment", {}),
+            text_response("I can't do that yet, but I can help you shop and check out."),
         ],
     )
 
-    result = service.chat("create a cart and check out")
+    result = service.chat("just charge my card already")
 
-    assert result.tool_calls[0].tool_name == "create_cart"
+    assert result.tool_calls[0].tool_name == "authorize_payment"
     assert result.tool_calls[0].ok is False
     assert result.tool_calls[0].error_code == "unknown_tool"
 

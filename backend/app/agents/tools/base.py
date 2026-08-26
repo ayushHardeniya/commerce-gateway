@@ -26,6 +26,7 @@ class ToolErrorCode(StrEnum):
 
     INVALID_INPUT = "invalid_input"
     NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
     INTERNAL_ERROR = "internal_error"
 
 
@@ -61,6 +62,16 @@ class ToolNotFoundError(Exception):
         self.message = message
 
 
+class ToolConflictError(Exception):
+    """Raise from `Tool._execute` when the request is well-formed and its
+    target exists, but current state blocks it (e.g. an out-of-stock
+    product, a price that changed, an already-active checkout)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 class Tool[InputT: BaseModel, OutputT: BaseModel](abc.ABC):
     """Base class for a single agent-callable operation.
 
@@ -84,6 +95,8 @@ class Tool[InputT: BaseModel, OutputT: BaseModel](abc.ABC):
             output = self._execute(parsed_input)
         except ToolNotFoundError as exc:
             return ToolResult.failure(ToolErrorCode.NOT_FOUND, exc.message)
+        except ToolConflictError as exc:
+            return ToolResult.failure(ToolErrorCode.CONFLICT, exc.message)
         except Exception:
             # Deliberately generic: a database/programming error must never
             # reach the LLM as a stack trace or raw driver message.

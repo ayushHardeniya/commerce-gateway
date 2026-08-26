@@ -1,13 +1,17 @@
 """The AI buyer: a small, bounded Gemini tool-calling loop.
 
-The safety boundary this module exists to enforce: Gemini never gets
-anything but the declared catalog tools (`app.agents.tools.CATALOG_TOOLS`
-by default). It cannot reach carts, inventory mutation, pricing, policy,
-authorization, or payment execution — those aren't cart/checkout/payment
-APIs that happen to be locked down, they simply do not exist as tools this
-loop knows how to call. Every tool call Gemini proposes is validated and
-executed through the existing `Tool` contract (`app.agents.tools.base`),
-never against the database or repository directly.
+The safety boundary this module exists to enforce: Gemini only ever gets
+the explicitly declared tools (`app.agents.tools.DEFAULT_TOOLS` by
+default) — catalog discovery plus cart/checkout preparation. It cannot
+reach pricing, policy, authorization, or payment execution, because no
+tool for any of those exists yet; that is enforced by omission, not by a
+runtime permission check that could be misconfigured. Every tool call
+Gemini proposes is validated and executed through the existing `Tool`
+contract (`app.agents.tools.base`), which in turn only ever calls
+deterministic application/domain services (`app.catalog`,
+`app.commerce.cart`, `app.commerce.checkout`) — never the database or a
+repository directly, and never anything that computes a price or a total
+itself.
 
 The loop itself is intentionally not recursive or open-ended: it runs at
 most `max_tool_iterations` model turns and then stops with a clear error,
@@ -24,7 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.gemini_client import GeminiConfigurationError, build_client, declare_tools
 from app.agents.schemas import AgentChatResponse, ToolCallRecord
-from app.agents.tools import CATALOG_TOOLS
+from app.agents.tools import DEFAULT_TOOLS
 from app.agents.tools.base import Tool
 from app.core.config import Settings, get_settings
 
@@ -69,7 +73,7 @@ class AIBuyerService:
         db: Session,
         *,
         settings: Settings | None = None,
-        tools: tuple[type[Tool], ...] = CATALOG_TOOLS,
+        tools: tuple[type[Tool], ...] = DEFAULT_TOOLS,
         max_tool_iterations: int = DEFAULT_MAX_TOOL_ITERATIONS,
         client: object | None = None,
     ) -> None:

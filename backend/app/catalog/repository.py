@@ -25,6 +25,10 @@ def get_merchant_by_slug(db: Session, slug: str) -> Merchant | None:
     return db.scalars(stmt).first()
 
 
+def get_merchant_by_id(db: Session, merchant_id: uuid.UUID) -> Merchant | None:
+    return db.get(Merchant, merchant_id)
+
+
 def get_product_by_id(db: Session, product_id: uuid.UUID) -> Product | None:
     stmt = select(Product).options(joinedload(Product.merchant)).where(Product.id == product_id)
     return db.scalars(stmt).first()

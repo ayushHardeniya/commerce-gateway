@@ -31,9 +31,18 @@ def test_catalog_module_does_not_import_agents() -> None:
         assert not offending, f"{path} must not import from app.agents: {offending}"
 
 
+def test_commerce_module_does_not_import_agents() -> None:
+    commerce_dir = Path(importlib.import_module("app.commerce").__file__).parent
+
+    for path in commerce_dir.rglob("*.py"):
+        imported = _imported_top_level_modules(path)
+        offending = {name for name in imported if name.startswith("app.agents")}
+        assert not offending, f"{path} must not import from app.agents: {offending}"
+
+
 def test_agents_tools_only_depend_on_catalog_and_shared_infrastructure() -> None:
     agents_dir = Path(importlib.import_module("app.agents").__file__).parent
-    allowed_prefixes = ("app.agents", "app.catalog", "app.db", "app.core")
+    allowed_prefixes = ("app.agents", "app.catalog", "app.commerce", "app.db", "app.core")
 
     for path in agents_dir.rglob("*.py"):
         imported = _imported_top_level_modules(path)
