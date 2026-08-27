@@ -21,6 +21,7 @@ from app.agents.tools.commerce import (
     RemoveCartItemTool,
     UpdateCartItemQuantityTool,
 )
+from app.agents.tools.policy import EvaluateCheckoutPolicyTool
 
 CATALOG_TOOLS: tuple[type[Tool], ...] = (SearchCatalogTool, GetProductTool)
 
@@ -33,15 +34,22 @@ COMMERCE_TOOLS: tuple[type[Tool], ...] = (
     CreateCheckoutTool,
 )
 
-DEFAULT_TOOLS: tuple[type[Tool], ...] = CATALOG_TOOLS + COMMERCE_TOOLS
+# Deliberately just one tool: evaluate/inspect a policy decision. There is no
+# authorize/approve/override tool here — human authorization is reachable
+# only through `app.commerce.policy.router`, never through `app.agents`.
+POLICY_TOOLS: tuple[type[Tool], ...] = (EvaluateCheckoutPolicyTool,)
+
+DEFAULT_TOOLS: tuple[type[Tool], ...] = CATALOG_TOOLS + COMMERCE_TOOLS + POLICY_TOOLS
 
 __all__ = [
     "CATALOG_TOOLS",
     "COMMERCE_TOOLS",
     "DEFAULT_TOOLS",
+    "POLICY_TOOLS",
     "AddCartItemTool",
     "CreateCartTool",
     "CreateCheckoutTool",
+    "EvaluateCheckoutPolicyTool",
     "GetCartTool",
     "GetProductTool",
     "RemoveCartItemTool",

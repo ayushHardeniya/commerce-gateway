@@ -1,4 +1,4 @@
-"""Structured domain errors shared by the cart and checkout routers.
+"""Structured domain errors shared by the cart, checkout, and policy routers.
 
 Mirrors the {code, message} shape already used by the agent tool contract
 (`app.agents.tools.base.ToolError`) rather than inventing a second error
@@ -76,6 +76,58 @@ class CheckoutExpiredError(CommerceError):
     code = "checkout_expired"
 
 
+class CheckoutInvalidError(CommerceError):
+    """The checkout exists but is not in a state a policy decision or an
+    authorization can be made against (not active — completed/cancelled —
+    or, for a policy decision, its currency doesn't match the policy's)."""
+
+    code = "checkout_invalid"
+
+
+class PolicyNotFoundError(CommerceError):
+    """No merchant policy has been explicitly configured — distinct from
+    `evaluate_checkout` falling back to the safe default at decision time."""
+
+    code = "policy_not_found"
+
+
+class PolicyDecisionNotFoundError(CommerceError):
+    """The checkout has not been evaluated against policy yet."""
+
+    code = "policy_decision_not_found"
+
+
+class AuthorizationRequiredError(CommerceError):
+    """No authorization exists yet for this checkout."""
+
+    code = "authorization_required"
+
+
+class AuthorizationNotRequiredError(CommerceError):
+    """The policy decision was ALLOW; there is nothing to authorize."""
+
+    code = "authorization_not_required"
+
+
+class AuthorizationDeniedError(CommerceError):
+    """The policy decision was DENY; it can never be authorized."""
+
+    code = "authorization_denied"
+
+
+class AlreadyAuthorizedError(CommerceError):
+    """This checkout already has an authorization; authorization is one-time."""
+
+    code = "already_authorized"
+
+
+class AuthorizationInvalidError(CommerceError):
+    """The checkout's current amount/currency/status no longer matches what
+    the policy decision being authorized was computed against."""
+
+    code = "authorization_invalid"
+
+
 class ProductUnavailableError(CommerceError):
     code = "product_unavailable"
 
@@ -122,6 +174,9 @@ _NOT_FOUND_CODES = frozenset(
         "product_not_found",
         "cart_item_not_found",
         "checkout_not_found",
+        "policy_not_found",
+        "policy_decision_not_found",
+        "authorization_required",
     }
 )
 
@@ -134,6 +189,11 @@ _STATUS_BY_CODE: dict[str, int] = {
     "price_changed": 409,
     "invalid_cart_state": 409,
     "checkout_expired": 409,
+    "checkout_invalid": 409,
+    "authorization_not_required": 409,
+    "authorization_denied": 409,
+    "already_authorized": 409,
+    "authorization_invalid": 409,
     **dict.fromkeys(_NOT_FOUND_CODES, 404),
 }
 

@@ -105,6 +105,55 @@ FastAPI application, internally organized into modules by domain concern.
     tool contract already uses, not a second error framework.
   - **Dependency direction**: `app.commerce` may depend on `app.catalog`;
     nothing in `app.catalog` depends on `app.commerce`.
+- **Policy and authorization module** (`app/commerce/policy/`) — the
+  deterministic gate a checkout passes through before anything moves money.
+  See
+  [`docs/decisions/0006-policy-snapshot-and-explicit-authorization.md`](docs/decisions/0006-policy-snapshot-and-explicit-authorization.md)
+  for the full reasoning; in short:
+  - **Flow**: `checkout → policy evaluation → ALLOW / REQUIRE_AUTHORIZATION /
+    DENY`, and for `REQUIRE_AUTHORIZATION`, an explicit human authorization
+    step produces `AUTHORIZED`. An LLM may request evaluation and read the
+    result; it never decides the outcome and never grants authorization —
+    both are deterministic application code, never an LLM response.
+  - **`MerchantPolicy`** (`models.py`): one mutable row per merchant
+    (`autonomous_limit_minor_units`, `currency`, an incrementing `version`).
+    A merchant with no explicit policy gets a safe default — an autonomous
+    limit of zero, so every nonzero checkout requires authorization until
+    the merchant configures a higher limit — rather than unrestricted
+    autonomous spending.
+  - **`PolicyDecision`**: one immutable, deterministic evaluation per
+    checkout (`app.commerce.policy.service.evaluate_checkout` is idempotent
+    — a checkout is evaluated once, and every later call returns that same
+    decision). It snapshots the exact policy values (limit, currency,
+    version) it was computed against onto itself, so a merchant editing
+    their policy afterward can never retroactively change what an
+    already-made decision meant. The amount/currency evaluated always comes
+    from the checkout's own authoritative, already-frozen total — never a
+    value an LLM or any other caller supplies. Rules: an active checkout
+    within the limit → `allow` (`within_autonomous_limit`); active but over
+    the limit → `require_authorization` (`autonomous_limit_exceeded`); an
+    expired, cancelled/completed, or currency-mismatched checkout →
+    `deny`, with a matching machine-readable reason.
+  - **`CheckoutAuthorization`**: the one-time human approval record for a
+    `require_authorization` decision. Its existence for a checkout *is* the
+    AUTHORIZED state, distinct from — and never conflated with — a future
+    payment succeeding. Granting one requires the decision to actually be
+    `require_authorization` (not `allow`, not `deny`), no authorization to
+    already exist for that checkout, and the checkout's live
+    amount/currency/status to still match both the caller's request and the
+    original decision — closing the window between evaluation and a human
+    approving it.
+  - **API** (`router.py`), under `/api/policy`: get/upsert a merchant's
+    policy (`GET`/`PUT /api/policy/merchants/{merchant_id}`), evaluate a
+    checkout (`POST /api/policy/checkouts/{checkout_id}/evaluate`), read its
+    decision (`GET .../decision`), authorize it
+    (`POST .../authorize`), and read the authorization
+    (`GET .../authorization`). Errors use the same structured `{code,
+    message}` shape as cart/checkout (`app.commerce.errors`), not a second
+    framework.
+  - **Dependency direction**: `app.commerce.policy` may depend on
+    `app.commerce.checkout`, `app.commerce.cart`, and `app.catalog`; nothing
+    in those modules depends back on it.
 - **Agent tool layer** (`app/agents/`) — the structured interface a future AI
   buyer will act through. See
   [`docs/decisions/0004-agent-tool-contract.md`](docs/decisions/0004-agent-tool-contract.md)
@@ -131,11 +180,21 @@ FastAPI application, internally organized into modules by domain concern.
     functions the HTTP API calls. A tool never computes a total, decides a
     price, or touches a repository/database directly; every business rule
     (availability, price-snapshot revalidation, deterministic totals) lives
-    in those services. Gemini has no tool for payment, authorization, or
-    policy because none exists yet — enforced by omission, not a runtime
-    check.
-  - **Dependency direction**: `app.agents` may depend on `app.catalog`;
-    nothing in `app.catalog` (or any other domain module) may depend on
+    in those services.
+  - **Policy tool** (`agents/tools/policy.py`): exactly one capability,
+    `evaluate_checkout_policy` — a thin wrapper over
+    `app.commerce.policy.service.evaluate_checkout` that lets Gemini ask
+    what policy says about an existing checkout and read back
+    `allow`/`require_authorization`/`deny` plus its reason. It cannot
+    supply its own amount (the service always loads the checkout's
+    authoritative total), change a merchant's policy, override a decision,
+    or grant authorization — there is no tool for any of that, and no
+    `Tool` in `app.agents` can reach `authorize_checkout`, which is only
+    ever called from `app.commerce.policy.router` (HTTP). Gemini has no
+    tool for payment because it doesn't exist yet — enforced by omission,
+    not a runtime check.
+  - **Dependency direction**: `app.agents` may depend on `app.catalog` and
+    `app.commerce`; nothing in `app.catalog` or `app.commerce` may depend on
     `app.agents`. This is enforced by a static import check in
     `backend/tests/agents/test_architecture.py`, not just convention.
   - **Gemini adapter** (`agents/gemini_client.py`) — the only file that
@@ -177,23 +236,23 @@ FastAPI application, internally organized into modules by domain concern.
 The following are part of the intended product but do not exist yet. They will
 be added incrementally, each behind its own scoped change:
 
-- **Transaction state machine** — deterministic modeling of a transaction's
-  lifecycle (created → policy-checked → authorized → paid → completed, with
-  failure/rollback paths).
-- **Policy engine** — deterministic, non-LLM checks that gate a transaction
-  before authorization (e.g. spend limits, allowed merchants/categories).
-- **Authorization** — the mechanism by which a transaction is explicitly
-  approved before payment execution.
+- **Payment execution** — a checkout that reaches `allow` or gets explicitly
+  `AUTHORIZED` is eligible for payment, but nothing yet executes it. The
+  remaining lifecycle steps (paid → completed, with failure/rollback paths)
+  are future work built on top of the checkout/policy/authorization state
+  established today.
 - **Payment provider abstraction** — a provider-agnostic interface for
   executing payment, with Razorpay Test Mode as the first concrete adapter.
   The abstraction is designed so no other part of the system depends on
   Razorpay-specific behavior.
-- **Audit trail** — a complete, queryable record of every step a transaction
+- **Audit trail** — a complete, queryable record of every step a checkout
   went through, sufficient to explain any money-moving decision after the
   fact.
-- **AI buyer, beyond cart/checkout preparation** — the agent loop can
-  discover products and prepare a cart/checkout, but has no tool for
-  policy, authorization, or payment, because those domains don't exist yet.
+- **AI buyer, beyond cart/checkout/policy** — the agent loop can discover
+  products, prepare a cart/checkout, and ask what policy says about a
+  checkout, but has no tool for payment because that domain doesn't exist
+  yet, and no tool anywhere for granting or overriding authorization —
+  that stays application-controlled by design, not merely unbuilt.
   Multi-turn conversation history across requests is also not implemented
   — each `POST /api/agent/chat` call is independent.
 
