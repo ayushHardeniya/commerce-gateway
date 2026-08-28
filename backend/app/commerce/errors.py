@@ -128,6 +128,51 @@ class AuthorizationInvalidError(CommerceError):
     code = "authorization_invalid"
 
 
+class CheckoutAlreadyPaidError(CommerceError):
+    """The checkout has already been successfully paid."""
+
+    code = "checkout_already_paid"
+
+
+class PolicyDeniedError(CommerceError):
+    """The policy decision was DENY; the checkout can never be paid."""
+
+    code = "policy_denied"
+
+
+class PaymentNotFoundError(CommerceError):
+    """No payment has been initiated for this checkout yet."""
+
+    code = "payment_not_found"
+
+
+class InvalidPaymentSignatureError(CommerceError):
+    """The Razorpay signature returned by the client does not verify
+    against our persisted order and the account secret."""
+
+    code = "invalid_payment_signature"
+
+
+class InvalidPaymentStateError(CommerceError):
+    """The confirmation being requested is inconsistent with the payment's
+    current state (already failed and not retried, order id mismatch, or a
+    successful confirmation replayed with a different provider payment id)."""
+
+    code = "invalid_payment_state"
+
+
+class PaymentProviderError(CommerceError):
+    """The payment provider rejected the request or returned an error."""
+
+    code = "payment_provider_error"
+
+
+class PaymentProviderTimeoutError(CommerceError):
+    """The payment provider did not respond in time."""
+
+    code = "payment_provider_timeout"
+
+
 class ProductUnavailableError(CommerceError):
     code = "product_unavailable"
 
@@ -177,6 +222,7 @@ _NOT_FOUND_CODES = frozenset(
         "policy_not_found",
         "policy_decision_not_found",
         "authorization_required",
+        "payment_not_found",
     }
 )
 
@@ -194,6 +240,12 @@ _STATUS_BY_CODE: dict[str, int] = {
     "authorization_denied": 409,
     "already_authorized": 409,
     "authorization_invalid": 409,
+    "checkout_already_paid": 409,
+    "policy_denied": 409,
+    "invalid_payment_signature": 409,
+    "invalid_payment_state": 409,
+    "payment_provider_error": 502,
+    "payment_provider_timeout": 504,
     **dict.fromkeys(_NOT_FOUND_CODES, 404),
 }
 

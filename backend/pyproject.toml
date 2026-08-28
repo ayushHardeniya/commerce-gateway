@@ -12,6 +12,8 @@ dependencies = [
     "alembic>=1.13",
     "psycopg[binary]>=3.2",
     "google-genai>=2.21.0",
+    "razorpay>=2.0.1",
+    "requests>=2.34.2",
 ]
 
 [dependency-groups]

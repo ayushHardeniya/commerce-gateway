@@ -49,3 +49,30 @@ def test_agents_tools_only_depend_on_catalog_and_shared_infrastructure() -> None
         app_imports = {name for name in imported if name.startswith("app.")}
         offending = {name for name in app_imports if not name.startswith(allowed_prefixes)}
         assert not offending, f"{path} has an unexpected app-internal dependency: {offending}"
+
+
+def test_no_payment_tool_is_declared() -> None:
+    """The AI buyer must never gain the ability to initiate, confirm,
+    capture, authorize, or refund a payment — enforced by omission (no such
+    `Tool` exists), the same pattern already used for `authorize_checkout`
+    (see `docs/decisions/0004-agent-tool-contract.md`). This is a regression
+    test: it fails the moment anyone adds a payment tool, on purpose or by
+    accident, rather than relying on code review alone."""
+    from app.agents.tools import DEFAULT_TOOLS
+
+    forbidden_substrings = ("payment", "pay", "razorpay", "charge", "capture", "refund")
+    offending = [
+        tool_cls.name
+        for tool_cls in DEFAULT_TOOLS
+        if any(word in tool_cls.name.lower() for word in forbidden_substrings)
+    ]
+    assert not offending, f"Payment-shaped tool(s) exposed to the agent: {offending}"
+
+
+def test_payment_module_does_not_import_agents() -> None:
+    payment_dir = Path(importlib.import_module("app.commerce.payment").__file__).parent
+
+    for path in payment_dir.glob("*.py"):
+        imported = _imported_top_level_modules(path)
+        offending = {name for name in imported if name.startswith("app.agents")}
+        assert not offending, f"{path} must not import from app.agents: {offending}"

@@ -154,6 +154,61 @@ FastAPI application, internally organized into modules by domain concern.
   - **Dependency direction**: `app.commerce.policy` may depend on
     `app.commerce.checkout`, `app.commerce.cart`, and `app.catalog`; nothing
     in those modules depends back on it.
+- **Payment module** (`app/commerce/payment/`) — the deterministic gate
+  between a checkout that policy has cleared and an actual Razorpay Test
+  Mode charge. See
+  [`docs/decisions/0007-payment-single-row-idempotency-and-provider-boundary.md`](docs/decisions/0007-payment-single-row-idempotency-and-provider-boundary.md)
+  for the full reasoning; in short:
+  - **Flow**: `Checkout → Policy/Authorization → Payment Service →
+    PaymentProvider → Razorpay Test Mode`. Payment can never bypass policy:
+    `app.commerce.payment.service` re-derives eligibility from the existing
+    M4 records (a `PolicyDecision` of `allow`, or `require_authorization`
+    with a matching `CheckoutAuthorization`) from scratch on every call —
+    at initiation *and* again at confirmation — rather than trusting
+    anything a caller claims. A `deny` decision, an expired checkout, or an
+    already-paid checkout is rejected before the provider is ever called.
+  - **`Payment`** (`models.py`): one row per checkout
+    (`UniqueConstraint("checkout_id")`), updated in place across retries —
+    the same single-mutable-row pattern `MerchantPolicy` already uses.
+    `amount_minor_units`/`currency` are always copied from the checkout's
+    own frozen total, never supplied by a caller; `status` is `created` /
+    `success` / `failed`. A successful confirmation is the one place a
+    `Checkout` transitions `active → completed`.
+  - **Provider abstraction** (`provider.py`): a two-method `PaymentProvider`
+    protocol (`create_order`, `verify_payment`) that
+    `app.commerce.payment.service` depends on — no Razorpay-specific type
+    ever appears in the service layer.
+  - **Razorpay adapter** (`razorpay.py`) — the only module that imports the
+    `razorpay` SDK. Creates orders through the SDK; verifies payment
+    signatures with a direct stdlib HMAC-SHA256 implementation of
+    Razorpay's documented scheme rather than the SDK's own verification
+    helper, so the one security-critical check has no dependency on the
+    SDK's internal exception hierarchy and needs no network access to test.
+  - **API** (`router.py`), under `/api/checkouts/{checkout_id}/payment`:
+    initiate (`POST`, no request body — amount/currency are never
+    caller-supplied), confirm (`POST .../confirm`, taking Razorpay
+    Checkout's own returned identifiers/signature), and read the current
+    payment (`GET`). Missing Razorpay configuration surfaces as 503, a
+    provider error/timeout as 502/504, an invalid signature as 409 — never
+    a generic 500. Errors use the same structured `{code, message}` shape
+    as the rest of `app.commerce`.
+  - **Idempotency**: a checkout can have at most one successful `Payment`
+    (a database constraint, not just an application check); initiating
+    payment while an order is already live returns the existing order
+    rather than creating a second one; confirming an already-successful
+    payment again is a safe no-op that neither re-verifies the signature
+    nor re-completes the checkout.
+  - **Tests**: a deterministic in-memory fake `PaymentProvider`
+    (`tests/commerce/payment/conftest.py`) drives all service/API tests —
+    none of the suite depends on live Razorpay credentials. The Razorpay
+    adapter's request/response mapping and HMAC verification are tested
+    separately against a stub, still with zero network access.
+  - **Dependency direction**: `app.commerce.payment` may depend on
+    `app.commerce.checkout`, `app.commerce.policy`, and `app.catalog`;
+    nothing in those modules depends back on it. Like `authorize_checkout`,
+    nothing in `app.agents` can reach payment initiation or confirmation —
+    there is no payment `Tool`, enforced by omission and backed by a
+    regression test (`tests/agents/test_architecture.py`).
 - **Agent tool layer** (`app/agents/`) — the structured interface a future AI
   buyer will act through. See
   [`docs/decisions/0004-agent-tool-contract.md`](docs/decisions/0004-agent-tool-contract.md)
@@ -236,25 +291,27 @@ FastAPI application, internally organized into modules by domain concern.
 The following are part of the intended product but do not exist yet. They will
 be added incrementally, each behind its own scoped change:
 
-- **Payment execution** — a checkout that reaches `allow` or gets explicitly
-  `AUTHORIZED` is eligible for payment, but nothing yet executes it. The
-  remaining lifecycle steps (paid → completed, with failure/rollback paths)
-  are future work built on top of the checkout/policy/authorization state
-  established today.
-- **Payment provider abstraction** — a provider-agnostic interface for
-  executing payment, with Razorpay Test Mode as the first concrete adapter.
-  The abstraction is designed so no other part of the system depends on
-  Razorpay-specific behavior.
+- **Full transaction state machine and reconciliation** — M5 only adds the
+  `active → completed` transition on a verified payment. A richer set of
+  states (e.g. distinguishing a cancelled checkout from a failed payment,
+  reconciling a provider-side success that arrives after a checkout has
+  expired) is deferred.
+- **Payment webhooks** — M5's confirmation path is the synchronous
+  Checkout.js round-trip (order → widget → `razorpay_payment_id`/
+  `razorpay_signature` → server verification). Asynchronous/delayed payment
+  methods and reconciliation via Razorpay webhooks are not implemented.
+- **Refunds** — no refund capability exists in the payment provider
+  abstraction or the API.
 - **Audit trail** — a complete, queryable record of every step a checkout
-  went through, sufficient to explain any money-moving decision after the
-  fact.
+  went through (including every payment attempt, not just the current one),
+  sufficient to explain any money-moving decision after the fact.
 - **AI buyer, beyond cart/checkout/policy** — the agent loop can discover
   products, prepare a cart/checkout, and ask what policy says about a
-  checkout, but has no tool for payment because that domain doesn't exist
-  yet, and no tool anywhere for granting or overriding authorization —
-  that stays application-controlled by design, not merely unbuilt.
-  Multi-turn conversation history across requests is also not implemented
-  — each `POST /api/agent/chat` call is independent.
+  checkout, but has no tool for payment, and no tool anywhere for granting
+  or overriding authorization — that stays application-controlled by
+  design, not merely unbuilt. Multi-turn conversation history across
+  requests is also not implemented — each `POST /api/agent/chat` call is
+  independent.
 
 ## Determinism boundary
 

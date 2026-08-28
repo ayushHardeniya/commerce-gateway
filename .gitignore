@@ -26,3 +26,7 @@ next-env.d.ts
 
 # --- Docker ---
 *.local.yml
+
+# Local-machine Docker Compose overrides (e.g. port remaps for a
+# conflicting local service) are machine-specific and not shared.
+docker-compose.override.yml

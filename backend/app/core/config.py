@@ -15,6 +15,21 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash"
 
+    # Test Mode credentials for the Razorpay adapter
+    # (app.commerce.payment.razorpay). Payment is unavailable (503) without
+    # them; the rest of the app works without them, same as Gemini above.
+    razorpay_key_id: str | None = None
+    razorpay_key_secret: str | None = None
+
+    # Comma-separated browser origins allowed to call this API (see
+    # app.main's CORSMiddleware setup). Defaults to the local Next.js dev
+    # server on both hostnames a browser may use for it.
+    cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    @property
+    def cors_allowed_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
+
 
 @lru_cache
 def get_settings() -> Settings:
