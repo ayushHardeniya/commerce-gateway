@@ -209,6 +209,54 @@ FastAPI application, internally organized into modules by domain concern.
     nothing in `app.agents` can reach payment initiation or confirmation —
     there is no payment `Tool`, enforced by omission and backed by a
     regression test (`tests/agents/test_architecture.py`).
+- **Transaction module** (`app/commerce/transaction/`) — a durable,
+  business-level record of one commerce attempt as it moves across
+  discovery, cart, checkout, policy, and payment, plus the deterministic
+  state machine that governs it. See
+  [`docs/decisions/0008-transaction-state-machine-validated-by-domain-state.md`](docs/decisions/0008-transaction-state-machine-validated-by-domain-state.md)
+  for the full reasoning; in short:
+  - **States** (`models.py`): `discovered → cart_created →
+    checkout_created → policy_pending → authorized → payment_pending →
+    payment_success → order_confirmed`, plus the failure/recovery states
+    `policy_denied`, `payment_failed` (recoverable — a retried payment can
+    move it back to `payment_pending`), `checkout_expired`, `cancelled`,
+    and `failed`. The last four of those, plus `order_confirmed`, are
+    terminal — no edge leaves them.
+  - **`Transaction`** (`models.py`): one mutable row per transaction,
+    updated in place — the same single-mutable-row pattern `Payment`/
+    `MerchantPolicy` already use, not a per-transition history table (a
+    full audit trail is M6B). It references `cart_id`/`checkout_id`
+    (both nullable — a transaction can exist before either is known) and
+    stores no copy of cart/checkout/policy/payment data; every guarded
+    transition below re-reads the real record instead.
+  - **State machine** (`service.py`): a fixed table of `(from_state,
+    to_state)` edges, each with a guard. An edge not in the table is
+    rejected outright (`invalid_transaction_transition`, 409) — no
+    skipping a state, no leaving a terminal one. For edges backed by a
+    real domain fact, the guard re-reads it fresh rather than trusting the
+    caller: `policy_pending → authorized` re-derives eligibility from the
+    checkout's actual `PolicyDecision`/`CheckoutAuthorization` (the same
+    check `app.commerce.payment.service` already performs);
+    `payment_pending → payment_success`/`payment_failed` require the
+    checkout's actual `Payment.status`; `→ checkout_expired` requires
+    `Checkout.effective_status == "expired"`; `payment_success →
+    order_confirmed` requires `Checkout.status == "completed"`. Payment
+    success can never be inferred from a caller's (or an LLM's) claim —
+    only a real `Payment` row moves a transaction there.
+  - **API** (`router.py`), under `/api/transactions`: create
+    (`POST`, optionally anchored to an existing `checkout_id` — the one
+    checkout-flow integration point, starting the transaction directly at
+    `checkout_created` with no change needed to `app.commerce.checkout`
+    itself), read (`GET /{id}`), and the single guarded transition endpoint
+    (`POST /{id}/transitions`). Errors use the same structured `{code,
+    message}` shape as the rest of `app.commerce`.
+  - **Dependency direction**: `app.commerce.transaction` may depend on
+    `app.commerce.cart`, `app.commerce.checkout`, `app.commerce.policy`,
+    and `app.commerce.payment`; nothing in those modules depends back on
+    it. No `Tool` in `app.agents` can reach transaction creation or
+    transitions — enforced by omission and backed by a regression test
+    (`tests/agents/test_architecture.py`), the same pattern already used
+    for payment.
 - **Agent tool layer** (`app/agents/`) — the structured interface a future AI
   buyer will act through. See
   [`docs/decisions/0004-agent-tool-contract.md`](docs/decisions/0004-agent-tool-contract.md)
@@ -291,11 +339,11 @@ FastAPI application, internally organized into modules by domain concern.
 The following are part of the intended product but do not exist yet. They will
 be added incrementally, each behind its own scoped change:
 
-- **Full transaction state machine and reconciliation** — M5 only adds the
-  `active → completed` transition on a verified payment. A richer set of
-  states (e.g. distinguishing a cancelled checkout from a failed payment,
-  reconciling a provider-side success that arrives after a checkout has
-  expired) is deferred.
+- **Full transaction audit trail and reconciliation** — M6A adds the
+  `Transaction` domain and its deterministic state machine (see above), but
+  not yet a queryable, per-transition audit trail (who/when/why for every
+  step, not just the current state) or reconciliation of a provider-side
+  success that arrives after a checkout has expired. Both are M6B.
 - **Payment webhooks** — M5's confirmation path is the synchronous
   Checkout.js round-trip (order → widget → `razorpay_payment_id`/
   `razorpay_signature` → server verification). Asynchronous/delayed payment

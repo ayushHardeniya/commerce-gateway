@@ -9,6 +9,7 @@ from app.commerce.policy.models import (  # noqa: F401
     MerchantPolicy,
     PolicyDecision,
 )
+from app.commerce.transaction.models import Transaction  # noqa: F401
 from app.db.session import Base
 
 __all__ = ["Base"]

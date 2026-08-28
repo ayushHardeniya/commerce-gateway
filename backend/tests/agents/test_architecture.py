@@ -76,3 +76,29 @@ def test_payment_module_does_not_import_agents() -> None:
         imported = _imported_top_level_modules(path)
         offending = {name for name in imported if name.startswith("app.agents")}
         assert not offending, f"{path} must not import from app.agents: {offending}"
+
+
+def test_no_transaction_tool_is_declared() -> None:
+    """The AI buyer must never gain the ability to create or transition a
+    `Transaction` directly — enforced by omission (no such `Tool` exists),
+    the same pattern `test_no_payment_tool_is_declared` already uses. State
+    transitions stay deterministic application code, reachable only through
+    `app.commerce.transaction.router` (HTTP)."""
+    from app.agents.tools import DEFAULT_TOOLS
+
+    forbidden_substrings = ("transaction", "transition")
+    offending = [
+        tool_cls.name
+        for tool_cls in DEFAULT_TOOLS
+        if any(word in tool_cls.name.lower() for word in forbidden_substrings)
+    ]
+    assert not offending, f"Transaction-shaped tool(s) exposed to the agent: {offending}"
+
+
+def test_transaction_module_does_not_import_agents() -> None:
+    transaction_dir = Path(importlib.import_module("app.commerce.transaction").__file__).parent
+
+    for path in transaction_dir.glob("*.py"):
+        imported = _imported_top_level_modules(path)
+        offending = {name for name in imported if name.startswith("app.agents")}
+        assert not offending, f"{path} must not import from app.agents: {offending}"

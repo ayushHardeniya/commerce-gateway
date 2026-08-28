@@ -8,6 +8,7 @@ from app.commerce.cart.router import router as cart_router
 from app.commerce.checkout.router import router as checkout_router
 from app.commerce.payment.router import router as payment_router
 from app.commerce.policy.router import router as policy_router
+from app.commerce.transaction.router import router as transaction_router
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -32,4 +33,5 @@ app.include_router(cart_router)
 app.include_router(checkout_router)
 app.include_router(policy_router)
 app.include_router(payment_router)
+app.include_router(transaction_router)
 app.include_router(agent_router)

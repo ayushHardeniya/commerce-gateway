@@ -173,6 +173,36 @@ class PaymentProviderTimeoutError(CommerceError):
     code = "payment_provider_timeout"
 
 
+class TransactionNotFoundError(CommerceError):
+    code = "transaction_not_found"
+
+
+class InvalidTransactionTransitionError(CommerceError):
+    """Either `(from_state, to_state)` is not an edge in the state machine,
+    or it is, but the live domain record(s) the transition is guarded by
+    (checkout expiry, policy decision, payment status) don't currently
+    support it. Both are "you can't do that transition right now" from the
+    caller's point of view."""
+
+    code = "invalid_transaction_transition"
+
+
+class TransactionInputMismatchError(CommerceError):
+    """The `cart_id`/`checkout_id` supplied for a transition or creation is
+    inconsistent with the transaction's existing references or with the
+    referenced record itself (e.g. a checkout that doesn't belong to the
+    transaction's cart)."""
+
+    code = "transaction_input_mismatch"
+
+
+class CheckoutAlreadyHasTransactionError(CommerceError):
+    """This checkout is already linked to a different transaction — a
+    checkout can be the anchor of at most one transaction."""
+
+    code = "checkout_already_has_transaction"
+
+
 class ProductUnavailableError(CommerceError):
     code = "product_unavailable"
 
@@ -223,6 +253,7 @@ _NOT_FOUND_CODES = frozenset(
         "policy_decision_not_found",
         "authorization_required",
         "payment_not_found",
+        "transaction_not_found",
     }
 )
 
@@ -230,6 +261,7 @@ _STATUS_BY_CODE: dict[str, int] = {
     "invalid_quantity": 422,
     "merchant_mismatch": 422,
     "currency_mismatch": 422,
+    "transaction_input_mismatch": 422,
     "empty_cart": 409,
     "product_unavailable": 409,
     "price_changed": 409,
@@ -244,6 +276,8 @@ _STATUS_BY_CODE: dict[str, int] = {
     "policy_denied": 409,
     "invalid_payment_signature": 409,
     "invalid_payment_state": 409,
+    "invalid_transaction_transition": 409,
+    "checkout_already_has_transaction": 409,
     "payment_provider_error": 502,
     "payment_provider_timeout": 504,
     **dict.fromkeys(_NOT_FOUND_CODES, 404),
