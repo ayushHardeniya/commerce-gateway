@@ -224,8 +224,8 @@ FastAPI application, internally organized into modules by domain concern.
     terminal — no edge leaves them.
   - **`Transaction`** (`models.py`): one mutable row per transaction,
     updated in place — the same single-mutable-row pattern `Payment`/
-    `MerchantPolicy` already use, not a per-transition history table (a
-    full audit trail is M6B). It references `cart_id`/`checkout_id`
+    `MerchantPolicy` already use, not a per-transition history table (that
+    history is `AuditEvent`, below). It references `cart_id`/`checkout_id`
     (both nullable — a transaction can exist before either is known) and
     stores no copy of cart/checkout/policy/payment data; every guarded
     transition below re-reads the real record instead.
@@ -243,20 +243,45 @@ FastAPI application, internally organized into modules by domain concern.
     order_confirmed` requires `Checkout.status == "completed"`. Payment
     success can never be inferred from a caller's (or an LLM's) claim —
     only a real `Payment` row moves a transaction there.
+  - **Audit trail** (`models.py`/`service.py`) — see
+    [`docs/decisions/0009-transaction-audit-trail-is-a-plain-append-only-table.md`](docs/decisions/0009-transaction-audit-trail-is-a-plain-append-only-table.md)
+    for the full reasoning; in short: `AuditEvent` is one immutable,
+    append-only row per successful transition (including the transaction's
+    own creation, recorded as a transition from no previous state),
+    written exclusively by `create_transaction`/`transition_transaction` —
+    no router, and nothing else anywhere in the codebase, writes one.
+    Ordering is a database-generated `sequence` identity column, not
+    `created_at` or the row's UUID (neither is a reliable order). Each row
+    records `from_state`/`to_state`, `actor_type` (`system` or `agent` —
+    a caller-stated distinction, not an authenticated one; every
+    transition today is `system` since no `Tool` in `app.agents` reaches
+    this module) and an optional `actor_id`, a `reason` (a domain-derived
+    fact — a policy denial reason, a payment failure code — when a guard
+    produced one, otherwise whatever the caller supplied), and small
+    `event_metadata` (policy decision id, payment id, and similar — never
+    a copy of the checkout/payment/catalog record those ids point to). A
+    transition rejected by the state machine never produces an event: the
+    guard raises before either the `Transaction` mutation or the
+    `AuditEvent` insert happens. The `Transaction` row's own mutation and
+    its `AuditEvent` are added to the session together and flushed/
+    committed in one call, so a transition and the record that it happened
+    are persisted atomically with no distributed-transaction machinery.
   - **API** (`router.py`), under `/api/transactions`: create
     (`POST`, optionally anchored to an existing `checkout_id` — the one
     checkout-flow integration point, starting the transaction directly at
     `checkout_created` with no change needed to `app.commerce.checkout`
-    itself), read (`GET /{id}`), and the single guarded transition endpoint
-    (`POST /{id}/transitions`). Errors use the same structured `{code,
-    message}` shape as the rest of `app.commerce`.
+    itself), read (`GET /{id}`), the single guarded transition endpoint
+    (`POST /{id}/transitions`), and the read-only audit history
+    (`GET /{id}/audit-events`, ordered oldest-first by `sequence`). Errors
+    use the same structured `{code, message}` shape as the rest of
+    `app.commerce`.
   - **Dependency direction**: `app.commerce.transaction` may depend on
     `app.commerce.cart`, `app.commerce.checkout`, `app.commerce.policy`,
     and `app.commerce.payment`; nothing in those modules depends back on
-    it. No `Tool` in `app.agents` can reach transaction creation or
-    transitions — enforced by omission and backed by a regression test
-    (`tests/agents/test_architecture.py`), the same pattern already used
-    for payment.
+    it. No `Tool` in `app.agents` can reach transaction creation,
+    transitions, or audit retrieval — enforced by omission and backed by a
+    regression test (`tests/agents/test_architecture.py`), the same
+    pattern already used for payment.
 - **Agent tool layer** (`app/agents/`) — the structured interface a future AI
   buyer will act through. See
   [`docs/decisions/0004-agent-tool-contract.md`](docs/decisions/0004-agent-tool-contract.md)
@@ -339,20 +364,22 @@ FastAPI application, internally organized into modules by domain concern.
 The following are part of the intended product but do not exist yet. They will
 be added incrementally, each behind its own scoped change:
 
-- **Full transaction audit trail and reconciliation** — M6A adds the
-  `Transaction` domain and its deterministic state machine (see above), but
-  not yet a queryable, per-transition audit trail (who/when/why for every
-  step, not just the current state) or reconciliation of a provider-side
-  success that arrives after a checkout has expired. Both are M6B.
+- **Reconciliation** — M6B's `AuditEvent` trail (see above) records every
+  successful `Transaction` transition, but nothing yet reconciles a
+  provider-side event (e.g. a Razorpay success) that arrives after a
+  checkout has already expired, or replays/repairs a transaction stuck
+  behind a `payment_failed` state without a caller-driven retry.
 - **Payment webhooks** — M5's confirmation path is the synchronous
   Checkout.js round-trip (order → widget → `razorpay_payment_id`/
   `razorpay_signature` → server verification). Asynchronous/delayed payment
   methods and reconciliation via Razorpay webhooks are not implemented.
 - **Refunds** — no refund capability exists in the payment provider
   abstraction or the API.
-- **Audit trail** — a complete, queryable record of every step a checkout
-  went through (including every payment attempt, not just the current one),
-  sufficient to explain any money-moving decision after the fact.
+- **Checkout/payment-attempt-level audit trail** — M6B's `AuditEvent` covers
+  every `Transaction` state transition, but not a separate, finer-grained
+  history of every individual payment attempt (only the current one is
+  persisted — see `Payment`'s single-mutable-row design) or of
+  checkout/cart edits below the transaction level.
 - **AI buyer, beyond cart/checkout/policy** — the agent loop can discover
   products, prepare a cart/checkout, and ask what policy says about a
   checkout, but has no tool for payment, and no tool anywhere for granting

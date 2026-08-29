@@ -1,4 +1,4 @@
-"""Transaction state machine.
+"""Transaction state machine and audit trail.
 
 This is the deterministic boundary described in
 `docs/decisions/0008-transaction-state-machine-validated-by-domain-state.md`:
@@ -11,9 +11,20 @@ claim that "policy allowed this" or "payment succeeded"; it always re-reads
 `app.commerce.checkout`/`policy`/`payment` state fresh, the same discipline
 `app.commerce.payment.service` already applies to eligibility.
 
+This is also the *only* place `AuditEvent` rows get written (see
+`docs/decisions/0009-transaction-audit-trail-is-a-plain-append-only-table.md`):
+`create_transaction` and `transition_transaction` each add exactly one
+`AuditEvent` to the session in the same call that mutates the `Transaction`
+row, and both go to the database in the same `flush()`/`commit()` — so a
+transition and the fact that it happened are persisted atomically, and a
+guard that raises (an invalid or domain-unsupported transition) never
+reaches the point where an event would be added at all.
+
 No `Tool` in `app.agents` reaches this module — enforced by omission, the
 same pattern already used for payment (see
 `tests/agents/test_architecture.py::test_no_transaction_tool_is_declared`).
+Audit events are therefore always written by this deterministic service
+code, never by (or on behalf of) an LLM's own judgment about what happened.
 """
 
 from __future__ import annotations
@@ -42,7 +53,10 @@ from app.commerce.payment.service import STATUS_SUCCESS as PAYMENT_STATUS_SUCCES
 from app.commerce.policy import repository as policy_repository
 from app.commerce.policy.service import DECISION_ALLOW, DECISION_REQUIRE_AUTHORIZATION
 from app.commerce.transaction import repository
-from app.commerce.transaction.models import Transaction
+from app.commerce.transaction.models import AuditEvent, Transaction
+
+ACTOR_SYSTEM = "system"
+ACTOR_AGENT = "agent"
 
 STATE_DISCOVERED = "discovered"
 STATE_CART_CREATED = "cart_created"
@@ -139,7 +153,13 @@ def _guard_any_to_checkout_expired(
     checkout = _require_checkout(db, transaction)
     if checkout.effective_status != "expired":
         raise InvalidTransactionTransitionError(f"Checkout '{checkout.id}' has not expired.")
-    return {"failure_reason": failure_reason or "checkout_expired"}
+    return {
+        "failure_reason": failure_reason or "checkout_expired",
+        "metadata": {
+            "checkout_id": str(checkout.id),
+            "expired_at": checkout.expires_at.isoformat(),
+        },
+    }
 
 
 def _guard_policy_pending_to_authorized(
@@ -152,7 +172,7 @@ def _guard_policy_pending_to_authorized(
             f"Checkout '{checkout.id}' has not been evaluated against policy yet."
         )
     if decision.decision == DECISION_ALLOW:
-        return {}
+        return {"metadata": {"policy_decision_id": str(decision.id), "policy_decision": "allow"}}
     if decision.decision == DECISION_REQUIRE_AUTHORIZATION:
         authorization = policy_repository.get_authorization_by_checkout(db, checkout.id)
         if authorization is None:
@@ -168,7 +188,13 @@ def _guard_policy_pending_to_authorized(
                 f"Checkout '{checkout.id}''s authorization no longer matches its current "
                 "amount/currency."
             )
-        return {}
+        return {
+            "metadata": {
+                "policy_decision_id": str(decision.id),
+                "policy_decision": "require_authorization",
+                "authorization_id": str(authorization.id),
+            }
+        }
     raise InvalidTransactionTransitionError(
         f"Checkout '{checkout.id}' was denied by policy; it cannot be authorized."
     )
@@ -183,7 +209,10 @@ def _guard_policy_pending_to_policy_denied(
         raise InvalidTransactionTransitionError(
             f"Checkout '{checkout.id}' was not denied by policy."
         )
-    return {"failure_reason": failure_reason or decision.reason}
+    return {
+        "failure_reason": failure_reason or decision.reason,
+        "metadata": {"policy_decision_id": str(decision.id)},
+    }
 
 
 def _guard_authorized_to_payment_pending(
@@ -195,7 +224,9 @@ def _guard_authorized_to_payment_pending(
         raise InvalidTransactionTransitionError(
             f"Checkout '{checkout.id}' has no payment currently in progress."
         )
-    return {}
+    return {
+        "metadata": {"payment_id": str(payment.id), "provider_order_id": payment.provider_order_id}
+    }
 
 
 def _guard_payment_pending_to_payment_success(
@@ -207,7 +238,12 @@ def _guard_payment_pending_to_payment_success(
         raise InvalidTransactionTransitionError(
             f"Checkout '{checkout.id}' does not have a successful payment."
         )
-    return {}
+    return {
+        "metadata": {
+            "payment_id": str(payment.id),
+            "provider_payment_id": payment.provider_payment_id,
+        }
+    }
 
 
 def _guard_payment_pending_to_payment_failed(
@@ -219,7 +255,10 @@ def _guard_payment_pending_to_payment_failed(
         raise InvalidTransactionTransitionError(
             f"Checkout '{checkout.id}' does not have a failed payment."
         )
-    return {"failure_reason": failure_reason or payment.failure_code}
+    return {
+        "failure_reason": failure_reason or payment.failure_code,
+        "metadata": {"payment_id": str(payment.id), "failure_code": payment.failure_code},
+    }
 
 
 def _guard_payment_failed_to_payment_pending(
@@ -232,7 +271,10 @@ def _guard_payment_failed_to_payment_pending(
             f"Checkout '{checkout.id}' does not have a new payment attempt in progress; "
             "initiate a retry before transitioning back to 'payment_pending'."
         )
-    return {"failure_reason": None}
+    return {
+        "failure_reason": None,
+        "metadata": {"payment_id": str(payment.id), "provider_order_id": payment.provider_order_id},
+    }
 
 
 def _guard_payment_success_to_order_confirmed(
@@ -243,7 +285,7 @@ def _guard_payment_success_to_order_confirmed(
         raise InvalidTransactionTransitionError(
             f"Checkout '{checkout.id}' is not marked completed yet."
         )
-    return {}
+    return {"metadata": {"checkout_id": str(checkout.id)}}
 
 
 def _guard_to_cancelled(
@@ -293,15 +335,35 @@ _TRANSITIONS: dict[tuple[str, str], _Guard] = {
 }
 
 
+def _validate_actor_type(actor_type: str) -> None:
+    if actor_type not in (ACTOR_SYSTEM, ACTOR_AGENT):
+        raise TransactionInputMismatchError(
+            f"'{actor_type}' is not a known audit actor_type (expected '{ACTOR_SYSTEM}' or "
+            f"'{ACTOR_AGENT}')."
+        )
+
+
 def create_transaction(
-    db: Session, *, cart_id: uuid.UUID | None = None, checkout_id: uuid.UUID | None = None
+    db: Session,
+    *,
+    cart_id: uuid.UUID | None = None,
+    checkout_id: uuid.UUID | None = None,
+    actor_type: str = ACTOR_SYSTEM,
+    actor_id: str | None = None,
+    reason: str | None = None,
 ) -> Transaction:
     """Start a new transaction. Reflects the checkout flow "only where
     necessary" (item 6 of M6A): passing `checkout_id` for an already-created
     checkout starts the transaction directly at `checkout_created` — no
     change to `app.commerce.checkout` was needed for that, since a
     transaction only ever references a checkout, never the reverse. Passing
-    neither starts at `discovered`, the pre-cart state."""
+    neither starts at `discovered`, the pre-cart state.
+
+    Creation is itself recorded as an audit event (`from_state=None`), added
+    to the session in the same call that adds the `Transaction` row and
+    flushed together — see the module docstring."""
+    _validate_actor_type(actor_type)
+
     if checkout_id is not None:
         checkout = checkout_repository.get_checkout_by_id(db, checkout_id)
         if checkout is None:
@@ -328,6 +390,19 @@ def create_transaction(
         transaction = Transaction(state=STATE_DISCOVERED)
 
     db.add(transaction)
+    db.flush()  # assigns transaction.id, needed for the audit event's FK
+
+    db.add(
+        AuditEvent(
+            transaction_id=transaction.id,
+            from_state=None,
+            to_state=transaction.state,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            reason=reason,
+            event_metadata=None,
+        )
+    )
     db.flush()
     db.refresh(transaction)
     return transaction
@@ -340,6 +415,14 @@ def get_transaction(db: Session, transaction_id: uuid.UUID) -> Transaction:
     return transaction
 
 
+def list_audit_events(db: Session, transaction_id: uuid.UUID) -> list[AuditEvent]:
+    """The transaction's full audit history, oldest first. Raises if the
+    transaction itself doesn't exist, the same "not found" semantics every
+    other `GET .../{transaction_id}/...` in this domain already has."""
+    get_transaction(db, transaction_id)  # 404s before querying an empty/absent history
+    return repository.list_audit_events_for_transaction(db, transaction_id)
+
+
 def transition_transaction(
     db: Session,
     *,
@@ -348,24 +431,57 @@ def transition_transaction(
     cart_id: uuid.UUID | None = None,
     checkout_id: uuid.UUID | None = None,
     failure_reason: str | None = None,
+    actor_type: str = ACTOR_SYSTEM,
+    actor_id: str | None = None,
+    reason: str | None = None,
 ) -> Transaction:
+    _validate_actor_type(actor_type)
     transaction = get_transaction(db, transaction_id)
+    from_state = transaction.state
 
-    guard = _TRANSITIONS.get((transaction.state, to_state))
+    guard = _TRANSITIONS.get((from_state, to_state))
     if guard is None:
         raise InvalidTransactionTransitionError(
-            f"Transaction '{transaction_id}' cannot move from '{transaction.state}' to "
-            f"'{to_state}'."
+            f"Transaction '{transaction_id}' cannot move from '{from_state}' to '{to_state}'."
         )
 
+    # The guard runs — and can raise `InvalidTransactionTransitionError` or
+    # `TransactionInputMismatchError` — entirely before anything below is
+    # touched. A rejected transition therefore never reaches the point
+    # where either the `Transaction` row or an `AuditEvent` is mutated/
+    # added, so no misleading "successful transition" event is possible.
     updates = guard(
         db, transaction, cart_id=cart_id, checkout_id=checkout_id, failure_reason=failure_reason
     )
+    event_metadata = updates.pop("metadata", None)
+    # The guard's own derived reason (a policy denial reason, a payment
+    # failure code, "checkout_expired") takes precedence over whatever the
+    # caller passed as `reason` — it reflects a verified domain fact rather
+    # than an unverified claim. Falls back to the caller's `reason` for
+    # edges with nothing to derive (e.g. a plain cancellation, or a retry
+    # that only clears `failure_reason` back to `None`).
+    audit_reason = updates.get("failure_reason") or reason
 
     transaction.state = to_state
     for field, value in updates.items():
         setattr(transaction, field, value)
 
+    db.add(
+        AuditEvent(
+            transaction_id=transaction.id,
+            from_state=from_state,
+            to_state=to_state,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            reason=audit_reason,
+            event_metadata=event_metadata,
+        )
+    )
+
+    # One flush persists both the `Transaction` mutation and its `AuditEvent`
+    # together: either both reach the database or (on a flush-time error,
+    # e.g. a constraint violation) neither does — there is no window where
+    # one exists without the other.
     db.flush()
     db.refresh(transaction)
     return transaction
