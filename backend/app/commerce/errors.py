@@ -198,9 +198,21 @@ class TransactionInputMismatchError(CommerceError):
 
 class CheckoutAlreadyHasTransactionError(CommerceError):
     """This checkout is already linked to a different transaction — a
-    checkout can be the anchor of at most one transaction."""
+    checkout can be the anchor of at most one transaction. Carries the
+    existing `transaction_id` in its structured detail so a caller (the
+    frontend, or the AI buyer's own tooling) can recover and use that
+    transaction instead of treating this as a dead end — see
+    `GET /api/transactions/by-checkout/{checkout_id}`, the same lookup this
+    id points at."""
 
-    code = "checkout_already_has_transaction"
+    code = "transaction_already_exists"
+
+    def __init__(self, message: str, *, transaction_id: uuid.UUID) -> None:
+        super().__init__(message)
+        self.transaction_id = transaction_id
+
+    def detail(self) -> dict:
+        return {**super().detail(), "transaction_id": str(self.transaction_id)}
 
 
 class ProductUnavailableError(CommerceError):
@@ -277,7 +289,7 @@ _STATUS_BY_CODE: dict[str, int] = {
     "invalid_payment_signature": 409,
     "invalid_payment_state": 409,
     "invalid_transaction_transition": 409,
-    "checkout_already_has_transaction": 409,
+    "transaction_already_exists": 409,
     "payment_provider_error": 502,
     "payment_provider_timeout": 504,
     **dict.fromkeys(_NOT_FOUND_CODES, 404),

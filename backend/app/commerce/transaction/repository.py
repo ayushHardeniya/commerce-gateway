@@ -10,7 +10,7 @@ pattern `app.commerce.policy` already uses for `PolicyDecision`.
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.commerce.transaction.models import AuditEvent, Transaction
@@ -24,6 +24,22 @@ def get_transaction_by_id(db: Session, transaction_id: uuid.UUID) -> Transaction
 def get_transaction_by_checkout(db: Session, checkout_id: uuid.UUID) -> Transaction | None:
     stmt = select(Transaction).where(Transaction.checkout_id == checkout_id)
     return db.scalars(stmt).first()
+
+
+def list_transactions(
+    db: Session, *, limit: int = 20, offset: int = 0
+) -> tuple[list[Transaction], int]:
+    """Newest first, ordered by `Transaction.sequence` (the database-
+    generated identity column) rather than `created_at` — see the model's
+    own comment for why `created_at` alone isn't a reliable order."""
+    total = db.scalar(select(func.count()).select_from(Transaction)) or 0
+
+    items = list(
+        db.scalars(
+            select(Transaction).order_by(Transaction.sequence.desc()).limit(limit).offset(offset)
+        ).all()
+    )
+    return items, total
 
 
 def create_audit_event(

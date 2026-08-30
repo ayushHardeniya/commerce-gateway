@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { ApiError, confirmPayment, initiatePayment } from "@/lib/api";
 
 /**
@@ -66,7 +67,19 @@ function loadRazorpayScript(): Promise<void> {
 type Stage = "idle" | "initiating" | "awaiting_checkout" | "confirming" | "success" | "error";
 
 export default function PayPage() {
-  const [checkoutId, setCheckoutId] = useState("");
+  return (
+    <Suspense fallback={null}>
+      <PayPageInner />
+    </Suspense>
+  );
+}
+
+/** `?checkout_id=` prefill, e.g. from the "Pay this checkout →" link on
+ * `/transactions/[id]`. Purely a convenience: the field stays a normal
+ * editable input, and nothing about the payment flow itself changes. */
+function PayPageInner() {
+  const searchParams = useSearchParams();
+  const [checkoutId, setCheckoutId] = useState(searchParams.get("checkout_id") ?? "");
   const [stage, setStage] = useState<Stage>("idle");
   const [message, setMessage] = useState<string | null>(null);
 

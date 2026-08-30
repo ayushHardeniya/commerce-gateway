@@ -270,11 +270,21 @@ FastAPI application, internally organized into modules by domain concern.
     (`POST`, optionally anchored to an existing `checkout_id` — the one
     checkout-flow integration point, starting the transaction directly at
     `checkout_created` with no change needed to `app.commerce.checkout`
-    itself), read (`GET /{id}`), the single guarded transition endpoint
+    itself), read (`GET /{id}`), a plain newest-first paginated listing
+    (`GET`, `limit`/`offset` only — ordered by a database-generated
+    `Transaction.sequence` identity column, the same reasoning
+    `AuditEvent.sequence` already documents: `created_at` alone isn't a
+    reliable order for rows inserted in the same DB transaction), lookup by
+    checkout (`GET /by-checkout/{checkout_id}`, M7B — the recovery path for
+    a caller that only has a checkout id, e.g. after a duplicate-creation
+    conflict), the single guarded transition endpoint
     (`POST /{id}/transitions`), and the read-only audit history
     (`GET /{id}/audit-events`, ordered oldest-first by `sequence`). Errors
     use the same structured `{code, message}` shape as the rest of
-    `app.commerce`.
+    `app.commerce`; creating a transaction for a checkout that already has
+    one returns `409 transaction_already_exists` with the existing
+    `transaction_id` in the body, so a caller can recover it rather than
+    just detect the conflict.
   - **Dependency direction**: `app.commerce.transaction` may depend on
     `app.commerce.cart`, `app.commerce.checkout`, `app.commerce.policy`,
     and `app.commerce.payment`; nothing in those modules depends back on
@@ -341,17 +351,69 @@ FastAPI application, internally organized into modules by domain concern.
     commerce tools above (`app.agents.tools.DEFAULT_TOOLS`): it has no path
     to inventory mutation, pricing, policy, authorization, or payment
     execution, because those simply are not declared tools — not because
-    of a runtime permission check that could be misconfigured.
+    of a runtime permission check that could be misconfigured. Every
+    request also carries a fixed `system_instruction`
+    (`CURRENCY_SAFETY_INSTRUCTION`, M7B): the catalog only ever prices in
+    USD, and there is no FX service anywhere in this codebase, so the model
+    is explicitly told never to convert a user-stated budget in another
+    currency (e.g. INR) itself or claim such a budget is satisfied/exceeded
+    from its own estimate — only to flag the mismatch and ask the user to
+    restate it in USD. This is a prompt-level guardrail, not a code-level
+    check, because the mismatch only ever exists in the user's free-text
+    message.
   - **API** (`agents/router.py`): `POST /api/agent/chat` — a typed
     (`AgentChatRequest`/`AgentChatResponse`) endpoint for exercising the
     loop; not a production chat UI and holds no conversation history across
     requests. Missing Gemini configuration, a Gemini/API failure, and
     iteration-limit exhaustion each surface as a distinct HTTP error
     (503/502/422) rather than a fabricated reply.
-- **Frontend skeleton** (`frontend/`): a Next.js (App Router, TypeScript,
-  Tailwind CSS) application with a minimal shell page that calls the backend's
-  `/health` endpoint through a small API client (`src/lib/api.ts`) to confirm
-  connectivity. It does not yet call the catalog API.
+- **Frontend** (`frontend/`) — a Next.js (App Router, TypeScript, Tailwind
+  CSS) application. It holds no business logic and computes no authoritative
+  value (price, policy decision, payment amount, transaction state) itself;
+  every page is a thin view over `app/main.py`'s API, reachable only through
+  `src/lib/api/` (`src/lib/api.ts` re-exported as a barrel — nothing outside
+  it calls `fetch` against `NEXT_PUBLIC_API_BASE_URL` directly), split into
+  one file per backend domain (`catalog.ts`, `checkout.ts`, `policy.ts`,
+  `payment.ts`, `transaction.ts`, `agent.ts`) mirroring `app/commerce/<domain>/schemas.py`.
+  Routes:
+  - `/` — the AI buyer surface: a chat UI over `POST /api/agent/chat`. Each
+    message is one independent request (the backend holds no conversation
+    history — see the agent loop above); the UI shows the reply alongside
+    the deterministic tool-call trace behind it (name, arguments, ok/error,
+    output), not just the model's prose. When a turn's tools created a
+    checkout, the page calls `POST /api/transactions` with that
+    `checkout_id` (`actor_type: "agent"`) — the M6A checkout-flow
+    integration point — and links to that transaction's detail page. If
+    that checkout already has one (`409 transaction_already_exists`, M7B),
+    the page recovers it instead of giving up: it reads the id straight off
+    the structured error, falling back to `GET /api/transactions/by-checkout/{id}`
+    if that field is ever missing, so the conversation always ends with a
+    working transaction link rather than a dead end.
+  - `/transactions/[id]` — reads `GET /api/transactions/{id}`,
+    `GET /api/transactions/{id}/audit-events`, and, once a `checkout_id` is
+    known, `GET /api/checkouts/{id}`, `GET /api/checkouts/{id}/payment`, and
+    `GET /api/policy/checkouts/{id}/decision` to show identity, current
+    state, checkout/payment/policy summaries, and the full audit trail. Its
+    state-progression view renders exactly the path in the audit trail
+    (one node per `AuditEvent.to_state`, in `sequence` order) rather than a
+    frontend copy of the transaction FSM — the page has no knowledge of
+    which transitions are valid, only of what the backend already recorded.
+    Read-only in M7A: no transition actions from the UI yet.
+  - `/merchant` — a merchant picker (from `GET /api/catalog/merchants`, no
+    auth/session concept exists) plus, per merchant: identity, its catalog
+    (`GET /api/catalog/merchants/{slug}/products`, searchable/paginated),
+    and its autonomous policy (`GET`/`PUT /api/policy/merchants/{id}`) via
+    a form that submits whatever limit/currency the operator chose — the
+    backend still owns whether it's accepted.
+  - `/pay` — unchanged from M5/M6: the Razorpay Test Mode Checkout
+    integration boundary. `/transactions/[id]` links into it
+    (`/pay?checkout_id=...`) as a query-param prefill only; the payment
+    flow itself was not touched.
+  - There is no "list transactions" or "list transactions for a merchant"
+    endpoint (M6B only added create/get/transition/audit-events for one
+    transaction at a time), so `/transactions/[id]` is reached either from
+    the AI buyer flow's own link or a direct id lookup (a small form in the
+    top nav) — not a browsable list.
 - **Local development infrastructure**: `docker-compose.yml` providing a
   PostgreSQL instance for local development. The backend and frontend
   applications run natively against it.

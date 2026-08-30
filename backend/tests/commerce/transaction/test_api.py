@@ -38,12 +38,94 @@ def test_create_transaction_missing_checkout_returns_404(client: TestClient) -> 
 def test_create_transaction_duplicate_checkout_returns_409(
     client: TestClient, checkout: Checkout
 ) -> None:
-    client.post("/api/transactions", json={"checkout_id": str(checkout.id)})
+    first = client.post("/api/transactions", json={"checkout_id": str(checkout.id)}).json()
 
     response = client.post("/api/transactions", json={"checkout_id": str(checkout.id)})
 
     assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "checkout_already_has_transaction"
+    detail = response.json()["detail"]
+    assert detail["code"] == "transaction_already_exists"
+    # Structured, not just embedded in the message — a caller (the frontend,
+    # the AI buyer's own recovery logic) can recover the existing
+    # transaction without parsing free text.
+    assert detail["transaction_id"] == first["id"]
+
+
+# --- GET /api/transactions/by-checkout/{checkout_id} ---
+
+
+def test_get_transaction_by_checkout(client: TestClient, checkout: Checkout) -> None:
+    created = client.post("/api/transactions", json={"checkout_id": str(checkout.id)}).json()
+
+    response = client.get(f"/api/transactions/by-checkout/{checkout.id}")
+
+    assert response.status_code == 200
+    assert response.json() == created
+
+
+def test_get_transaction_by_checkout_missing_returns_404(
+    client: TestClient, checkout: Checkout
+) -> None:
+    """A real checkout with no transaction yet — distinct from a checkout id
+    that doesn't exist at all, which this endpoint doesn't distinguish
+    (it never loads the checkout, only queries transactions by checkout id;
+    both cases mean "nothing to recover here")."""
+    response = client.get(f"/api/transactions/by-checkout/{checkout.id}")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "transaction_not_found"
+
+
+def test_get_transaction_by_checkout_unknown_id_returns_404(client: TestClient) -> None:
+    response = client.get(f"/api/transactions/by-checkout/{uuid.uuid4()}")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "transaction_not_found"
+
+
+# --- GET /api/transactions (listing) ---
+
+
+def test_list_transactions_empty(client: TestClient) -> None:
+    response = client.get("/api/transactions")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"items": [], "total": 0, "limit": 20, "offset": 0}
+
+
+def test_list_transactions_returns_newest_first(client: TestClient, checkout: Checkout) -> None:
+    first = client.post("/api/transactions", json={}).json()
+    second = client.post("/api/transactions", json={"checkout_id": str(checkout.id)}).json()
+
+    response = client.get("/api/transactions")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 2
+    ids = [item["id"] for item in body["items"]]
+    assert ids == [second["id"], first["id"]]
+
+
+def test_list_transactions_pagination(client: TestClient) -> None:
+    created = [client.post("/api/transactions", json={}).json() for _ in range(3)]
+
+    first_page = client.get("/api/transactions?limit=2&offset=0").json()
+    second_page = client.get("/api/transactions?limit=2&offset=2").json()
+
+    assert first_page["total"] == 3
+    assert len(first_page["items"]) == 2
+    assert len(second_page["items"]) == 1
+    all_ids = {item["id"] for item in first_page["items"] + second_page["items"]}
+    assert all_ids == {t["id"] for t in created}
+
+
+def test_list_transactions_limit_is_bounded(client: TestClient) -> None:
+    response = client.get("/api/transactions?limit=0")
+    assert response.status_code == 422
+
+    response = client.get("/api/transactions?limit=101")
+    assert response.status_code == 422
 
 
 def test_get_transaction(client: TestClient, checkout: Checkout) -> None:

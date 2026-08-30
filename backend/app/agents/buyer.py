@@ -34,6 +34,29 @@ from app.core.config import Settings, get_settings
 
 DEFAULT_MAX_TOOL_ITERATIONS = 4
 
+# Sent with every request as `GenerateContentConfig.system_instruction` — the
+# one guardrail this module adds against a real failure mode: the catalog
+# only ever prices in USD, but a user may naturally state a budget in their
+# own currency (e.g. INR). Nothing in this codebase performs currency
+# conversion (no FX service, deliberately), so the model must never do it
+# silently either: an approximate, LLM-guessed conversion presented as if it
+# settled a budget question would be exactly the kind of unverified
+# financial claim `CLAUDE.md`'s determinism boundary rules out. This
+# instruction is the entire mechanism — there is no code-level currency
+# check, because the mismatch only exists in the user's free-text message,
+# which only the model reads.
+CURRENCY_SAFETY_INSTRUCTION = (
+    "Every price you see from a tool (search_catalog, get_product, and any cart or "
+    "checkout total) is in USD — this catalog only sells in USD, never any other "
+    "currency. If the user states a budget or amount in a different currency (for "
+    "example INR, EUR, GBP, or symbols like ₹ or €), you have no access to a "
+    "real exchange rate and this system provides none. Never convert the amount "
+    "yourself, and never state or imply that their budget is satisfied, exceeded, or "
+    "otherwise compared against a USD price using your own estimate of an exchange "
+    "rate. Instead, tell the user plainly that prices here are in USD and ask them to "
+    "restate their budget in USD before you compare it to anything."
+)
+
 # Transport-level failures the google-genai SDK's own retry logic (see
 # google.genai._api_client) treats as transient and re-raises as-is once
 # retries are exhausted, rather than wrapping in `APIError` — `APIError` only
@@ -126,7 +149,9 @@ class AIBuyerService:
             return client.models.generate_content(
                 model=self._settings.gemini_model,
                 contents=contents,
-                config=types.GenerateContentConfig(tools=tools),
+                config=types.GenerateContentConfig(
+                    tools=tools, system_instruction=CURRENCY_SAFETY_INSTRUCTION
+                ),
             )
         except (APIError, *_TRANSPORT_ERRORS) as exc:
             raise AgentProviderError(f"Gemini request failed: {exc}") from exc

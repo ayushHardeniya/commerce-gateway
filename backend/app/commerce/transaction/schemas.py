@@ -79,6 +79,18 @@ class TransactionRead(BaseModel):
     updated_at: datetime
 
 
+class TransactionPage(BaseModel):
+    """A page of transactions, newest first, with the total row count for
+    pagination — the same minimal shape `app.catalog.schemas.ProductPage`
+    already uses. Not a search/filter system: no query params beyond
+    `limit`/`offset`."""
+
+    items: list[TransactionRead]
+    total: int
+    limit: int
+    offset: int
+
+
 class AuditEventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

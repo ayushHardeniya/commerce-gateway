@@ -130,7 +130,8 @@ def _guard_cart_created_to_checkout_created(
     existing = repository.get_transaction_by_checkout(db, checkout_id)
     if existing is not None and existing.id != transaction.id:
         raise CheckoutAlreadyHasTransactionError(
-            f"Checkout '{checkout_id}' is already linked to transaction '{existing.id}'."
+            f"Checkout '{checkout_id}' is already linked to transaction '{existing.id}'.",
+            transaction_id=existing.id,
         )
     return {"checkout_id": checkout.id, "cart_id": checkout.cart_id}
 
@@ -376,7 +377,8 @@ def create_transaction(
         existing = repository.get_transaction_by_checkout(db, checkout_id)
         if existing is not None:
             raise CheckoutAlreadyHasTransactionError(
-                f"Checkout '{checkout_id}' is already linked to transaction '{existing.id}'."
+                f"Checkout '{checkout_id}' is already linked to transaction '{existing.id}'.",
+                transaction_id=existing.id,
             )
         transaction = Transaction(
             cart_id=checkout.cart_id, checkout_id=checkout.id, state=STATE_CHECKOUT_CREATED
@@ -413,6 +415,28 @@ def get_transaction(db: Session, transaction_id: uuid.UUID) -> Transaction:
     if transaction is None:
         raise TransactionNotFoundError(f"No transaction found with id '{transaction_id}'.")
     return transaction
+
+
+def get_transaction_by_checkout(db: Session, checkout_id: uuid.UUID) -> Transaction:
+    """The recovery path M7B adds: given a checkout id, find the one
+    transaction anchored to it (if any) rather than requiring a caller to
+    already know the transaction id — e.g. after `create_transaction` fails
+    with `CheckoutAlreadyHasTransactionError`, this is what resolves that
+    error's `transaction_id` back into the actual row."""
+    transaction = repository.get_transaction_by_checkout(db, checkout_id)
+    if transaction is None:
+        raise TransactionNotFoundError(f"No transaction found for checkout '{checkout_id}'.")
+    return transaction
+
+
+def list_transactions(
+    db: Session, *, limit: int = 20, offset: int = 0
+) -> tuple[list[Transaction], int]:
+    """A plain, deterministic listing — newest first, ties broken by `id` so
+    the ordering never depends on `created_at` timestamp resolution. Not a
+    search/filter system: `limit`/`offset` only, the same minimal shape
+    `app.catalog.repository.search_products` already uses."""
+    return repository.list_transactions(db, limit=limit, offset=offset)
 
 
 def list_audit_events(db: Session, transaction_id: uuid.UUID) -> list[AuditEvent]:

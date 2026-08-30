@@ -72,10 +72,59 @@ def test_create_transaction_mismatched_cart_and_checkout_raises(
 def test_create_transaction_checkout_already_linked_raises(
     db_session: Session, checkout: Checkout
 ) -> None:
-    transaction_service.create_transaction(db_session, checkout_id=checkout.id)
+    first = transaction_service.create_transaction(db_session, checkout_id=checkout.id)
 
-    with pytest.raises(CheckoutAlreadyHasTransactionError):
+    with pytest.raises(CheckoutAlreadyHasTransactionError) as exc_info:
         transaction_service.create_transaction(db_session, checkout_id=checkout.id)
+    assert exc_info.value.transaction_id == first.id
+    assert exc_info.value.code == "transaction_already_exists"
+
+
+# --- get_transaction_by_checkout ---
+
+
+def test_get_transaction_by_checkout(db_session: Session, checkout: Checkout) -> None:
+    created = transaction_service.create_transaction(db_session, checkout_id=checkout.id)
+
+    found = transaction_service.get_transaction_by_checkout(db_session, checkout.id)
+
+    assert found.id == created.id
+
+
+def test_get_transaction_by_checkout_missing_raises(
+    db_session: Session, checkout: Checkout
+) -> None:
+    with pytest.raises(TransactionNotFoundError):
+        transaction_service.get_transaction_by_checkout(db_session, checkout.id)
+
+
+# --- list_transactions ---
+
+
+def test_list_transactions_empty(db_session: Session) -> None:
+    items, total = transaction_service.list_transactions(db_session)
+    assert items == []
+    assert total == 0
+
+
+def test_list_transactions_orders_newest_first(db_session: Session, checkout: Checkout) -> None:
+    first = transaction_service.create_transaction(db_session)
+    second = transaction_service.create_transaction(db_session, checkout_id=checkout.id)
+
+    items, total = transaction_service.list_transactions(db_session)
+
+    assert total == 2
+    assert [item.id for item in items] == [second.id, first.id]
+
+
+def test_list_transactions_respects_limit_and_offset(db_session: Session) -> None:
+    created = [transaction_service.create_transaction(db_session) for _ in range(3)]
+
+    items, total = transaction_service.list_transactions(db_session, limit=2, offset=1)
+
+    assert total == 3
+    assert len(items) == 2
+    assert [item.id for item in items] == [created[1].id, created[0].id]
 
 
 # --- get_transaction ---
@@ -171,15 +220,16 @@ def test_transition_cart_created_to_checkout_created_already_linked_rejected(
     db_session: Session, checkout: Checkout
 ) -> None:
     other = transaction_service.create_transaction(db_session, cart_id=checkout.cart_id)
-    transaction_service.create_transaction(db_session, checkout_id=checkout.id)
+    existing = transaction_service.create_transaction(db_session, checkout_id=checkout.id)
 
-    with pytest.raises(CheckoutAlreadyHasTransactionError):
+    with pytest.raises(CheckoutAlreadyHasTransactionError) as exc_info:
         transaction_service.transition_transaction(
             db_session,
             transaction_id=other.id,
             to_state=transaction_service.STATE_CHECKOUT_CREATED,
             checkout_id=checkout.id,
         )
+    assert exc_info.value.transaction_id == existing.id
 
 
 def test_transition_cart_created_to_checkout_created_succeeds(

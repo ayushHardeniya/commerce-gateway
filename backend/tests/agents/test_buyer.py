@@ -6,6 +6,7 @@ from google.genai.errors import APIError
 from sqlalchemy.orm import Session
 
 from app.agents.buyer import (
+    CURRENCY_SAFETY_INSTRUCTION,
     AgentConfigurationError,
     AgentIterationLimitExceeded,
     AgentProviderError,
@@ -273,3 +274,28 @@ def test_chat_raises_provider_error_when_final_response_has_no_usable_text(
 
     with pytest.raises(AgentProviderError):
         service.chat("find me headphones")
+
+
+# --- currency safety (M7B) ---
+
+
+def test_chat_sends_currency_safety_system_instruction(db_session: Session) -> None:
+    """The catalog is USD-only; a user may naturally state a budget in a
+    different currency (e.g. INR). There is no FX service and no code-level
+    currency check — this instruction, sent with every request, is the
+    entire mechanism preventing the model from silently converting and
+    presenting an approximate result as if it were authoritative. This test
+    can't verify the model *obeys* it (that needs a real Gemini call), only
+    that every request actually carries it."""
+    fake = FakeGeminiClient([text_response("Hi there!")])
+    service = AIBuyerService(
+        db_session, settings=Settings(_env_file=None, gemini_api_key="test-key"), client=fake
+    )
+
+    service.chat("Find me something under ₹500")
+
+    assert len(fake.models.calls) == 1
+    system_instruction = fake.models.calls[0]["config"].system_instruction
+    assert system_instruction == CURRENCY_SAFETY_INSTRUCTION
+    assert "USD" in system_instruction
+    assert "convert" in system_instruction.lower()
