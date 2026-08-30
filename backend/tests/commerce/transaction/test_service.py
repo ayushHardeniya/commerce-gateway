@@ -342,6 +342,48 @@ def test_transition_policy_pending_to_authorized_requires_human_authorization(
     assert updated.state == transaction_service.STATE_AUTHORIZED
 
 
+def test_transition_policy_pending_to_authorized_rejected_when_denied(
+    db_session: Session, merchant: Merchant, checkout: Checkout
+) -> None:
+    """M8A: the guard's third branch — a real `deny` decision must never be
+    treated as authorized. Also proves the rejection is truly a no-op: the
+    transaction's state is unchanged and no audit event was written for the
+    attempt, the same "no misleading event for a rejected transition"
+    guarantee `test_rejected_transition_creates_no_event` already proves
+    elsewhere."""
+    policy_service.upsert_policy(
+        db_session, merchant_id=merchant.id, autonomous_limit_minor_units=5000, currency="EUR"
+    )
+    policy_service.evaluate_checkout(db_session, checkout.id)
+    decision = policy_service.get_decision(db_session, checkout.id)
+    assert decision.decision == "deny"
+
+    transaction = transaction_service.create_transaction(db_session, checkout_id=checkout.id)
+    transaction_service.transition_transaction(
+        db_session,
+        transaction_id=transaction.id,
+        to_state=transaction_service.STATE_POLICY_PENDING,
+    )
+    events_before = transaction_repository.list_audit_events_for_transaction(
+        db_session, transaction.id
+    )
+
+    with pytest.raises(InvalidTransactionTransitionError):
+        transaction_service.transition_transaction(
+            db_session,
+            transaction_id=transaction.id,
+            to_state=transaction_service.STATE_AUTHORIZED,
+        )
+
+    reloaded = transaction_service.get_transaction(db_session, transaction.id)
+    assert reloaded.state == transaction_service.STATE_POLICY_PENDING
+
+    events_after = transaction_repository.list_audit_events_for_transaction(
+        db_session, transaction.id
+    )
+    assert len(events_after) == len(events_before)
+
+
 def test_transition_policy_pending_to_policy_denied_requires_real_denial(
     db_session: Session, merchant: Merchant, checkout: Checkout
 ) -> None:

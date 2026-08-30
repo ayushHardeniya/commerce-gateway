@@ -3,9 +3,10 @@ import uuid
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.catalog.models import Merchant
+from app.catalog.models import Merchant, Product
 from app.commerce.checkout.models import Checkout
 from app.commerce.policy import service as policy_service
+from tests.commerce.payment.conftest import FakePaymentProvider
 
 
 def test_create_transaction_discovered(client: TestClient) -> None:
@@ -249,3 +250,245 @@ def test_transition_transaction_through_policy_allow(
 
     assert response.status_code == 200
     assert response.json()["state"] == "authorized"
+
+
+# --- M8A: full lifecycle / cross-domain boundary tests ---
+#
+# Everything below drives the real application boundary — cart, checkout,
+# policy, payment, and transaction — entirely through the HTTP API, the way
+# a real client actually would. Payment goes through the existing
+# `FakePaymentProvider` test double (see `conftest.py`'s `client` override
+# in this directory); nothing here ever calls real Razorpay or Gemini.
+
+
+def test_full_http_lifecycle_allow_to_order_confirmed(
+    client: TestClient,
+    db_session: Session,
+    merchant: Merchant,
+    checkout: Checkout,
+    fake_provider: FakePaymentProvider,
+) -> None:
+    """ALLOW path, start to finish, over the real API: checkout already
+    exists (fixture) -> policy evaluates to `allow` -> transaction walks
+    checkout_created -> policy_pending -> authorized -> payment_pending ->
+    payment_success -> order_confirmed, with a real (fake-provider-backed)
+    payment initiated and confirmed along the way, and the checkout itself
+    ending up `completed`."""
+    _allow(db_session, merchant, checkout)
+
+    tx = client.post("/api/transactions", json={"checkout_id": str(checkout.id)}).json()
+    tx_id = tx["id"]
+    assert tx["state"] == "checkout_created"
+
+    client.post(f"/api/transactions/{tx_id}/transitions", json={"to_state": "policy_pending"})
+    authorized = client.post(
+        f"/api/transactions/{tx_id}/transitions", json={"to_state": "authorized"}
+    )
+    assert authorized.json()["state"] == "authorized"
+
+    order = client.post(f"/api/checkouts/{checkout.id}/payment")
+    assert order.status_code == 201
+    pending = client.post(
+        f"/api/transactions/{tx_id}/transitions", json={"to_state": "payment_pending"}
+    )
+    assert pending.json()["state"] == "payment_pending"
+
+    fake_provider.next_signature_valid = True
+    payment = client.post(
+        f"/api/checkouts/{checkout.id}/payment/confirm",
+        json={
+            "razorpay_order_id": order.json()["provider_order_id"],
+            "razorpay_payment_id": "pay_fake_1",
+            "razorpay_signature": "irrelevant-fake-accepts-it",
+        },
+    )
+    assert payment.json()["status"] == "success"
+
+    success = client.post(
+        f"/api/transactions/{tx_id}/transitions", json={"to_state": "payment_success"}
+    )
+    assert success.json()["state"] == "payment_success"
+    confirmed = client.post(
+        f"/api/transactions/{tx_id}/transitions", json={"to_state": "order_confirmed"}
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["state"] == "order_confirmed"
+
+    assert client.get(f"/api/checkouts/{checkout.id}").json()["status"] == "completed"
+
+    events = client.get(f"/api/transactions/{tx_id}/audit-events").json()
+    assert [e["to_state"] for e in events] == [
+        "checkout_created",
+        "policy_pending",
+        "authorized",
+        "payment_pending",
+        "payment_success",
+        "order_confirmed",
+    ]
+
+
+def test_full_http_lifecycle_require_authorization_to_order_confirmed(
+    client: TestClient,
+    checkout: Checkout,
+    fake_provider: FakePaymentProvider,
+) -> None:
+    """REQUIRE_AUTHORIZATION path, start to finish: default policy (no
+    explicit `MerchantPolicy` -> autonomous limit 0) forces
+    `require_authorization`; payment is proven unreachable until a human
+    authorizes; authorizing then unblocks both the transaction's own
+    `-> authorized` transition and payment initiation, and the transaction
+    still reaches `order_confirmed` exactly like the ALLOW path."""
+    decision = client.post(f"/api/policy/checkouts/{checkout.id}/evaluate").json()
+    assert decision["decision"] == "require_authorization"
+
+    tx = client.post("/api/transactions", json={"checkout_id": str(checkout.id)}).json()
+    tx_id = tx["id"]
+    client.post(f"/api/transactions/{tx_id}/transitions", json={"to_state": "policy_pending"})
+
+    # Cannot proceed as paid without authorization — neither leg of it.
+    blocked_transition = client.post(
+        f"/api/transactions/{tx_id}/transitions", json={"to_state": "authorized"}
+    )
+    assert blocked_transition.status_code == 409
+    blocked_payment = client.post(f"/api/checkouts/{checkout.id}/payment")
+    assert blocked_payment.status_code == 404
+    assert blocked_payment.json()["detail"]["code"] == "authorization_required"
+
+    authorize = client.post(
+        f"/api/policy/checkouts/{checkout.id}/authorize",
+        json={
+            "amount_minor_units": checkout.total_minor_units,
+            "currency": checkout.currency,
+        },
+    )
+    assert authorize.status_code == 201
+
+    authorized = client.post(
+        f"/api/transactions/{tx_id}/transitions", json={"to_state": "authorized"}
+    )
+    assert authorized.json()["state"] == "authorized"
+
+    order = client.post(f"/api/checkouts/{checkout.id}/payment")
+    assert order.status_code == 201
+    client.post(f"/api/transactions/{tx_id}/transitions", json={"to_state": "payment_pending"})
+
+    fake_provider.next_signature_valid = True
+    payment = client.post(
+        f"/api/checkouts/{checkout.id}/payment/confirm",
+        json={
+            "razorpay_order_id": order.json()["provider_order_id"],
+            "razorpay_payment_id": "pay_fake_1",
+            "razorpay_signature": "irrelevant-fake-accepts-it",
+        },
+    )
+    assert payment.json()["status"] == "success"
+
+    client.post(f"/api/transactions/{tx_id}/transitions", json={"to_state": "payment_success"})
+    confirmed = client.post(
+        f"/api/transactions/{tx_id}/transitions", json={"to_state": "order_confirmed"}
+    )
+    assert confirmed.json()["state"] == "order_confirmed"
+
+    events = client.get(f"/api/transactions/{tx_id}/audit-events").json()
+    assert [e["to_state"] for e in events] == [
+        "checkout_created",
+        "policy_pending",
+        "authorized",
+        "payment_pending",
+        "payment_success",
+        "order_confirmed",
+    ]
+    # The `authorized` event's own metadata reflects the real decision it
+    # was granted against, not a caller's claim about it.
+    authorized_event = events[2]
+    assert authorized_event["event_metadata"]["policy_decision"] == "require_authorization"
+
+
+def test_deny_decision_blocks_every_domain_and_leaves_a_consistent_audit_trail(
+    client: TestClient, db_session: Session, merchant: Merchant, checkout: Checkout
+) -> None:
+    """The cross-domain boundary: one `deny` decision, proven unbypassable
+    from every angle a caller could try it — payment initiation, the
+    transaction's own `-> authorized` transition, and (implicitly) any
+    further progress at all. Deliberately doesn't re-walk every way a
+    decision can end up `deny` (`tests/commerce/policy` already does that in
+    depth) — only that once it is, nothing downstream can route around it."""
+    # A currency-mismatched policy is the one way to get a real `deny` on an
+    # otherwise-active checkout (same technique already used elsewhere in
+    # this file/`app.commerce.payment.test_service`).
+    policy_service.upsert_policy(
+        db_session, merchant_id=merchant.id, autonomous_limit_minor_units=5000, currency="EUR"
+    )
+    decision = client.post(f"/api/policy/checkouts/{checkout.id}/evaluate").json()
+    assert decision["decision"] == "deny"
+
+    payment_attempt = client.post(f"/api/checkouts/{checkout.id}/payment")
+    assert payment_attempt.status_code == 409
+    assert payment_attempt.json()["detail"]["code"] == "policy_denied"
+
+    tx = client.post("/api/transactions", json={"checkout_id": str(checkout.id)}).json()
+    tx_id = tx["id"]
+    client.post(f"/api/transactions/{tx_id}/transitions", json={"to_state": "policy_pending"})
+
+    authorize_attempt = client.post(
+        f"/api/transactions/{tx_id}/transitions", json={"to_state": "authorized"}
+    )
+    assert authorize_attempt.status_code == 409
+
+    # No route to a paid/confirmed outcome exists from here: the FSM has no
+    # edge from `policy_pending` to `payment_pending`/`payment_success`/
+    # `order_confirmed` at all (proven structurally elsewhere), and the one
+    # edge that matters for this scenario — `-> authorized` — is the one
+    # just rejected above. The transaction is left exactly where it was.
+    final = client.get(f"/api/transactions/{tx_id}").json()
+    assert final["state"] == "policy_pending"
+
+    no_payment = client.get(f"/api/checkouts/{checkout.id}/payment")
+    assert no_payment.status_code == 404
+    assert no_payment.json()["detail"]["code"] == "payment_not_found"
+
+    events = client.get(f"/api/transactions/{tx_id}/audit-events").json()
+    assert [e["to_state"] for e in events] == ["checkout_created", "policy_pending"]
+
+
+def test_checkout_can_still_be_paid_after_its_product_is_deleted(
+    client: TestClient,
+    db_session: Session,
+    merchant: Merchant,
+    product: Product,
+    checkout: Checkout,
+    fake_provider: FakePaymentProvider,
+) -> None:
+    """`CheckoutItem` denormalizes product name/sku/price at checkout-
+    creation time (`docs/decisions/0005-cart-price-snapshot.md`) precisely
+    so a checkout stays a complete, payable record even if its product is
+    later removed — `CheckoutItem.product_id` is `ON DELETE SET NULL`, not
+    a hard requirement. `test_deleting_product_sets_checkout_item_product_id_null`
+    already proves the FK goes null at the DB level; this proves the
+    stronger, product-independent invariant it exists for: the checkout can
+    still be paid to a real (fake-provider) success afterward."""
+    product_name = product.name
+    _allow(db_session, merchant, checkout)
+
+    db_session.delete(product)
+    db_session.flush()
+
+    order = client.post(f"/api/checkouts/{checkout.id}/payment")
+    assert order.status_code == 201
+
+    fake_provider.next_signature_valid = True
+    payment = client.post(
+        f"/api/checkouts/{checkout.id}/payment/confirm",
+        json={
+            "razorpay_order_id": order.json()["provider_order_id"],
+            "razorpay_payment_id": "pay_fake_1",
+            "razorpay_signature": "irrelevant-fake-accepts-it",
+        },
+    )
+    assert payment.status_code == 200
+    assert payment.json()["status"] == "success"
+
+    checkout_after = client.get(f"/api/checkouts/{checkout.id}").json()
+    assert checkout_after["status"] == "completed"
+    assert checkout_after["items"][0]["product_id"] is None
+    assert checkout_after["items"][0]["product_name"] == product_name
