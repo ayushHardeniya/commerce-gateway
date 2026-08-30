@@ -48,3 +48,6 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Body", "f
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live_gemini: exercises the real Gemini API (real quota cost). Skipped by default; opt in with RUN_LIVE_GEMINI_EVAL=1. See docs/evaluation/README.md.",
+]
