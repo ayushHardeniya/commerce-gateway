@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.buyer import (
     CURRENCY_SAFETY_INSTRUCTION,
+    DEFAULT_MAX_TOOL_ITERATIONS,
     AgentConfigurationError,
     AgentIterationLimitExceeded,
     AgentProviderError,
@@ -219,6 +220,49 @@ def test_chat_raises_when_iteration_limit_is_exhausted(db_session: Session) -> N
         service.chat("keep searching forever")
 
     assert len(fake.models.calls) == 2
+
+
+def test_chat_exhausts_iteration_limit_when_multi_step_flow_leaves_no_turn_to_answer(
+    db_session: Session,
+) -> None:
+    """M8C: pins the exact shape a real live run hit (Scenario G,
+    `docs/evaluation/README.md`) — a model making genuine, purposeful
+    progress (search, then cart, then item, then checkout — not stuck
+    calling the same tool forever, unlike
+    `test_chat_raises_when_iteration_limit_is_exhausted` above) can still
+    exhaust `max_tool_iterations` at the real default, because a final
+    text-only reply draws from the *same* budget as every tool-calling
+    turn. If a flow legitimately needs exactly
+    `DEFAULT_MAX_TOOL_ITERATIONS` tool calls, there is by construction no
+    turn left over for the model to actually answer — this is a real
+    product/iteration-budget mismatch to keep visible as a regression, not
+    a hypothetical.
+    """
+    responses = [
+        function_call_response("search_catalog", {"query": "wireless headphones"}),
+        function_call_response("create_cart", {"merchant_id": str(uuid.uuid4())}),
+        function_call_response(
+            "add_cart_item",
+            {"cart_id": str(uuid.uuid4()), "product_id": str(uuid.uuid4()), "quantity": 1},
+        ),
+        function_call_response("create_checkout", {"cart_id": str(uuid.uuid4())}),
+    ]
+    # This scenario is only meaningful if it needs *exactly* the full
+    # default budget for tool calls alone, leaving nothing for a final
+    # answer — if `DEFAULT_MAX_TOOL_ITERATIONS` ever changes, this makes
+    # that mismatch loud rather than silently testing a different shape.
+    assert len(responses) == DEFAULT_MAX_TOOL_ITERATIONS
+    responses.append(text_response("Here's your checkout summary."))  # never reached
+
+    fake = FakeGeminiClient(responses)
+    service = AIBuyerService(
+        db_session, settings=Settings(_env_file=None, gemini_api_key="test-key"), client=fake
+    )
+
+    with pytest.raises(AgentIterationLimitExceeded):
+        service.chat("Find the Wireless Headphones and create a checkout for one.")
+
+    assert len(fake.models.calls) == DEFAULT_MAX_TOOL_ITERATIONS
 
 
 # --- configuration ---
