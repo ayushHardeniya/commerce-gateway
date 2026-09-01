@@ -108,6 +108,7 @@ def evaluate_checkout(db: Session, checkout_id: uuid.UUID) -> PolicyDecision:
 
     existing = policy_repository.get_decision_by_checkout(db, checkout_id)
     if existing is not None:
+        _sync_transaction_after_decision(db, checkout_id=checkout_id, decision=existing)
         return existing
 
     merchant_id = _merchant_id_for_checkout(db, checkout)
@@ -141,7 +142,49 @@ def evaluate_checkout(db: Session, checkout_id: uuid.UUID) -> PolicyDecision:
     db.add(record)
     db.flush()
     db.refresh(record)
+    _sync_transaction_after_decision(db, checkout_id=checkout_id, decision=record)
     return record
+
+
+def _sync_transaction_after_decision(
+    db: Session, *, checkout_id: uuid.UUID, decision: PolicyDecision
+) -> None:
+    """M9B: advance the checkout's `Transaction` (if any) to reflect that
+    policy has now been evaluated — `checkout_created -> policy_pending`
+    always, then immediately on to whichever of `authorized`/`policy_denied`
+    the decision itself already settles. `require_authorization` stops at
+    `policy_pending`: a human must still act through
+    `app.commerce.policy.router`'s own `authorize_checkout` endpoint (see
+    below) before this transaction can move further — evaluating a checkout
+    never authorizes it.
+
+    Called on every call to `evaluate_checkout`, including the idempotent
+    "already decided" short-circuit above, so a `Transaction` attached
+    *after* a checkout was already evaluated still catches up.
+
+    Local import, here and in every other `sync_transaction_state` call
+    site added for M9B (`authorize_checkout` below,
+    `app.commerce.payment.service`): `app.commerce.transaction.service`
+    itself imports names from both this module and
+    `app.commerce.payment.service` (`DECISION_ALLOW`/`DECISION_REQUIRE_AUTHORIZATION`,
+    `STATUS_CREATED`/`STATUS_SUCCESS`/`STATUS_FAILED`), so importing it back
+    at *their* module load time would be circular; importing it inside the
+    function instead defers the import until both modules have already
+    finished loading.
+    """
+    from app.commerce.transaction import service as transaction_service
+
+    transaction_service.sync_transaction_state(
+        db, checkout_id=checkout_id, to_state=transaction_service.STATE_POLICY_PENDING
+    )
+    if decision.decision == DECISION_ALLOW:
+        transaction_service.sync_transaction_state(
+            db, checkout_id=checkout_id, to_state=transaction_service.STATE_AUTHORIZED
+        )
+    elif decision.decision == DECISION_DENY:
+        transaction_service.sync_transaction_state(
+            db, checkout_id=checkout_id, to_state=transaction_service.STATE_POLICY_DENIED
+        )
 
 
 def get_decision(db: Session, checkout_id: uuid.UUID) -> PolicyDecision:
@@ -222,6 +265,17 @@ def authorize_checkout(
     db.add(authorization)
     db.flush()
     db.refresh(authorization)
+
+    # M9B: this is the one place a `require_authorization` transaction can
+    # legitimately reach `authorized` — a real human approval, through this
+    # same HTTP-only path, just happened. See the local-import note on
+    # `_sync_transaction_after_decision` above.
+    from app.commerce.transaction import service as transaction_service
+
+    transaction_service.sync_transaction_state(
+        db, checkout_id=checkout_id, to_state=transaction_service.STATE_AUTHORIZED
+    )
+
     return authorization
 
 

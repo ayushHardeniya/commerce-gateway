@@ -273,7 +273,19 @@ def test_full_http_lifecycle_allow_to_order_confirmed(
     checkout_created -> policy_pending -> authorized -> payment_pending ->
     payment_success -> order_confirmed, with a real (fake-provider-backed)
     payment initiated and confirmed along the way, and the checkout itself
-    ending up `completed`."""
+    ending up `completed`.
+
+    M9B: policy is evaluated (via `_allow`) before this test's own
+    `Transaction` exists, and `-> authorized` still has to be driven
+    explicitly below for the same reason — neither
+    `policy.service.evaluate_checkout` nor `authorize_checkout` has anything
+    to advance yet. But `payment.service.initiate_payment`/`confirm_payment`
+    run *after* the transaction is linked and `authorized`, so those two
+    calls now drive `-> payment_pending`, `-> payment_success`, and
+    `-> order_confirmed` themselves — this test reads the resulting state
+    back rather than re-requesting transitions the payment calls already
+    made (which would now be rejected as a no-op self-transition, the same
+    "no misleading event" guarantee `transition_transaction` always had)."""
     _allow(db_session, merchant, checkout)
 
     tx = client.post("/api/transactions", json={"checkout_id": str(checkout.id)}).json()
@@ -288,10 +300,8 @@ def test_full_http_lifecycle_allow_to_order_confirmed(
 
     order = client.post(f"/api/checkouts/{checkout.id}/payment")
     assert order.status_code == 201
-    pending = client.post(
-        f"/api/transactions/{tx_id}/transitions", json={"to_state": "payment_pending"}
-    )
-    assert pending.json()["state"] == "payment_pending"
+    pending = client.get(f"/api/transactions/{tx_id}").json()
+    assert pending["state"] == "payment_pending"
 
     fake_provider.next_signature_valid = True
     payment = client.post(
@@ -304,15 +314,8 @@ def test_full_http_lifecycle_allow_to_order_confirmed(
     )
     assert payment.json()["status"] == "success"
 
-    success = client.post(
-        f"/api/transactions/{tx_id}/transitions", json={"to_state": "payment_success"}
-    )
-    assert success.json()["state"] == "payment_success"
-    confirmed = client.post(
-        f"/api/transactions/{tx_id}/transitions", json={"to_state": "order_confirmed"}
-    )
-    assert confirmed.status_code == 200
-    assert confirmed.json()["state"] == "order_confirmed"
+    confirmed = client.get(f"/api/transactions/{tx_id}").json()
+    assert confirmed["state"] == "order_confirmed"
 
     assert client.get(f"/api/checkouts/{checkout.id}").json()["status"] == "completed"
 
@@ -337,7 +340,14 @@ def test_full_http_lifecycle_require_authorization_to_order_confirmed(
     `require_authorization`; payment is proven unreachable until a human
     authorizes; authorizing then unblocks both the transaction's own
     `-> authorized` transition and payment initiation, and the transaction
-    still reaches `order_confirmed` exactly like the ALLOW path."""
+    still reaches `order_confirmed` exactly like the ALLOW path.
+
+    M9B: once the transaction exists and is `policy_pending`,
+    `authorize_checkout`/`initiate_payment`/`confirm_payment` each drive
+    their own real transition as a side effect — this test reads the
+    resulting state back with `GET` rather than re-requesting a transition
+    those calls already made (see the equivalent comment on
+    `test_full_http_lifecycle_allow_to_order_confirmed` above)."""
     decision = client.post(f"/api/policy/checkouts/{checkout.id}/evaluate").json()
     assert decision["decision"] == "require_authorization"
 
@@ -363,14 +373,13 @@ def test_full_http_lifecycle_require_authorization_to_order_confirmed(
     )
     assert authorize.status_code == 201
 
-    authorized = client.post(
-        f"/api/transactions/{tx_id}/transitions", json={"to_state": "authorized"}
-    )
-    assert authorized.json()["state"] == "authorized"
+    authorized = client.get(f"/api/transactions/{tx_id}").json()
+    assert authorized["state"] == "authorized"
 
     order = client.post(f"/api/checkouts/{checkout.id}/payment")
     assert order.status_code == 201
-    client.post(f"/api/transactions/{tx_id}/transitions", json={"to_state": "payment_pending"})
+    pending = client.get(f"/api/transactions/{tx_id}").json()
+    assert pending["state"] == "payment_pending"
 
     fake_provider.next_signature_valid = True
     payment = client.post(
@@ -383,11 +392,8 @@ def test_full_http_lifecycle_require_authorization_to_order_confirmed(
     )
     assert payment.json()["status"] == "success"
 
-    client.post(f"/api/transactions/{tx_id}/transitions", json={"to_state": "payment_success"})
-    confirmed = client.post(
-        f"/api/transactions/{tx_id}/transitions", json={"to_state": "order_confirmed"}
-    )
-    assert confirmed.json()["state"] == "order_confirmed"
+    confirmed = client.get(f"/api/transactions/{tx_id}").json()
+    assert confirmed["state"] == "order_confirmed"
 
     events = client.get(f"/api/transactions/{tx_id}/audit-events").json()
     assert [e["to_state"] for e in events] == [

@@ -334,11 +334,10 @@ def test_transition_policy_pending_to_authorized_requires_human_authorization(
         currency=checkout.currency,
     )
 
-    updated = transaction_service.transition_transaction(
-        db_session,
-        transaction_id=transaction.id,
-        to_state=transaction_service.STATE_AUTHORIZED,
-    )
+    # M9B: `authorize_checkout` itself drives this transition now, as a real
+    # side effect of the human approval it just recorded — no separate call
+    # needed (see `app.commerce.policy.service.authorize_checkout`).
+    updated = transaction_service.get_transaction(db_session, transaction.id)
     assert updated.state == transaction_service.STATE_AUTHORIZED
 
 
@@ -409,11 +408,10 @@ def test_transition_policy_pending_to_policy_denied_requires_real_denial(
     )
     policy_service.evaluate_checkout(db_session, checkout.id)
 
-    updated = transaction_service.transition_transaction(
-        db_session,
-        transaction_id=transaction.id,
-        to_state=transaction_service.STATE_POLICY_DENIED,
-    )
+    # M9B: `evaluate_checkout` itself drives this transition now — a `deny`
+    # decision syncs straight through to `policy_denied` (see
+    # `app.commerce.policy.service._sync_transaction_after_decision`).
+    updated = transaction_service.get_transaction(db_session, transaction.id)
     assert updated.state == transaction_service.STATE_POLICY_DENIED
     assert updated.failure_reason == "currency_mismatch"
 
@@ -455,15 +453,16 @@ def test_transition_authorized_to_payment_pending_requires_live_payment(
 def test_full_lifecycle_allow_to_order_confirmed(
     db_session: Session, merchant: Merchant, checkout: Checkout
 ) -> None:
+    """M9B: once the transaction exists and is `authorized` (via
+    `_to_authorized`), `initiate_payment`/`confirm_payment` each drive their
+    own real transition as a side effect — this test reloads the
+    transaction to observe the result rather than re-requesting a
+    transition those calls already made."""
     provider = FakePaymentProvider()
     transaction = _to_authorized(db_session, merchant, checkout)
 
     payment_service.initiate_payment(db_session, checkout_id=checkout.id, provider=provider)
-    pending = transaction_service.transition_transaction(
-        db_session,
-        transaction_id=transaction.id,
-        to_state=transaction_service.STATE_PAYMENT_PENDING,
-    )
+    pending = transaction_service.get_transaction(db_session, transaction.id)
     assert pending.state == transaction_service.STATE_PAYMENT_PENDING
 
     payment = payment_service.get_payment(db_session, checkout.id)
@@ -476,18 +475,7 @@ def test_full_lifecycle_allow_to_order_confirmed(
         provider=provider,
     )
 
-    success = transaction_service.transition_transaction(
-        db_session,
-        transaction_id=transaction.id,
-        to_state=transaction_service.STATE_PAYMENT_SUCCESS,
-    )
-    assert success.state == transaction_service.STATE_PAYMENT_SUCCESS
-
-    confirmed = transaction_service.transition_transaction(
-        db_session,
-        transaction_id=transaction.id,
-        to_state=transaction_service.STATE_ORDER_CONFIRMED,
-    )
+    confirmed = transaction_service.get_transaction(db_session, transaction.id)
     assert confirmed.state == transaction_service.STATE_ORDER_CONFIRMED
 
 
@@ -501,10 +489,10 @@ def test_payment_success_cannot_be_asserted_without_a_real_payment(
     provider = FakePaymentProvider()
     transaction = _to_authorized(db_session, merchant, checkout)
     payment_service.initiate_payment(db_session, checkout_id=checkout.id, provider=provider)
-    transaction_service.transition_transaction(
-        db_session,
-        transaction_id=transaction.id,
-        to_state=transaction_service.STATE_PAYMENT_PENDING,
+    # M9B: `initiate_payment` itself already drove `-> payment_pending`.
+    assert (
+        transaction_service.get_transaction(db_session, transaction.id).state
+        == transaction_service.STATE_PAYMENT_PENDING
     )
 
     with pytest.raises(InvalidTransactionTransitionError):
@@ -518,14 +506,17 @@ def test_payment_success_cannot_be_asserted_without_a_real_payment(
 def test_payment_failure_and_retry(
     db_session: Session, merchant: Merchant, checkout: Checkout
 ) -> None:
+    """M9B: `confirm_payment` itself drives `-> payment_failed` on a
+    rejected signature, and a subsequent `initiate_payment` retry drives
+    `-> payment_pending` again — both as real side effects of the payment
+    calls, not separate transition requests."""
     provider = FakePaymentProvider()
     provider.next_signature_valid = False
     transaction = _to_authorized(db_session, merchant, checkout)
     payment_service.initiate_payment(db_session, checkout_id=checkout.id, provider=provider)
-    transaction_service.transition_transaction(
-        db_session,
-        transaction_id=transaction.id,
-        to_state=transaction_service.STATE_PAYMENT_PENDING,
+    assert (
+        transaction_service.get_transaction(db_session, transaction.id).state
+        == transaction_service.STATE_PAYMENT_PENDING
     )
     payment = payment_service.get_payment(db_session, checkout.id)
     with pytest.raises(Exception):  # noqa: B017 - InvalidPaymentSignatureError, see payment.errors
@@ -538,23 +529,15 @@ def test_payment_failure_and_retry(
             provider=provider,
         )
 
-    failed = transaction_service.transition_transaction(
-        db_session,
-        transaction_id=transaction.id,
-        to_state=transaction_service.STATE_PAYMENT_FAILED,
-    )
+    failed = transaction_service.get_transaction(db_session, transaction.id)
     assert failed.state == transaction_service.STATE_PAYMENT_FAILED
     assert failed.failure_reason == "invalid_payment_signature"
 
-    # Retry: re-initiate payment, then the transaction can move back to
-    # payment_pending, with its failure_reason cleared.
+    # Retry: re-initiate payment, then the transaction moves back to
+    # payment_pending on its own, with its failure_reason cleared.
     provider.next_signature_valid = True
     payment_service.initiate_payment(db_session, checkout_id=checkout.id, provider=provider)
-    retried = transaction_service.transition_transaction(
-        db_session,
-        transaction_id=transaction.id,
-        to_state=transaction_service.STATE_PAYMENT_PENDING,
-    )
+    retried = transaction_service.get_transaction(db_session, transaction.id)
     assert retried.state == transaction_service.STATE_PAYMENT_PENDING
     assert retried.failure_reason is None
 

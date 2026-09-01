@@ -122,6 +122,7 @@ def initiate_payment(db: Session, *, checkout_id: uuid.UUID, provider: PaymentPr
         if existing.status == STATUS_CREATED:
             # Idempotent: an order already exists for this attempt. Never
             # ask the provider to create a second one for it.
+            _sync_transaction_payment_pending(db, checkout_id=checkout_id)
             return existing
 
     try:
@@ -160,7 +161,30 @@ def initiate_payment(db: Session, *, checkout_id: uuid.UUID, provider: PaymentPr
 
     db.flush()
     db.refresh(payment)
+    _sync_transaction_payment_pending(db, checkout_id=checkout_id)
     return payment
+
+
+def _sync_transaction_payment_pending(db: Session, *, checkout_id: uuid.UUID) -> None:
+    """M9B: a `Payment` row now exists in `created` status — the real fact
+    both `authorized -> payment_pending` and the `payment_failed ->
+    payment_pending` retry edge are guarded on. Requesting `payment_pending`
+    unconditionally and letting `transition_transaction` pick the matching
+    edge for the transaction's *actual* current state (rather than this
+    function trying to know which of the two applies) is what makes this
+    safe to call from both the fresh-payment and retry-after-failure paths
+    above, and from the idempotent early return, with no branching here.
+    Local import: `app.commerce.transaction.service` imports
+    `STATUS_CREATED`/`STATUS_SUCCESS`/`STATUS_FAILED` from this module, so
+    importing it back at this module's own load time would be circular —
+    see `app.commerce.policy.service._sync_transaction_after_decision`'s
+    docstring for the full explanation (the same reasoning applies there).
+    """
+    from app.commerce.transaction import service as transaction_service
+
+    transaction_service.sync_transaction_state(
+        db, checkout_id=checkout_id, to_state=transaction_service.STATE_PAYMENT_PENDING
+    )
 
 
 def get_payment(db: Session, checkout_id: uuid.UUID) -> Payment:
@@ -217,6 +241,7 @@ def confirm_payment(
         payment.failure_code = exc.code
         payment.failure_message = exc.message
         db.flush()
+        _sync_transaction_payment_failed(db, checkout_id=checkout_id)
         raise
 
     valid = provider.verify_payment(
@@ -232,6 +257,7 @@ def confirm_payment(
         payment.failure_code = error.code
         payment.failure_message = error.message
         db.flush()
+        _sync_transaction_payment_failed(db, checkout_id=checkout_id)
         raise error
 
     payment.provider_payment_id = provider_payment_id
@@ -239,4 +265,39 @@ def confirm_payment(
     checkout.status = "completed"
     db.flush()
     db.refresh(payment)
+    _sync_transaction_payment_succeeded(db, checkout_id=checkout_id)
     return payment
+
+
+def _sync_transaction_payment_failed(db: Session, *, checkout_id: uuid.UUID) -> None:
+    """M9B: `Payment.status` was just durably set to `failed` (either
+    eligibility was lost between initiate and confirm, or the signature
+    didn't verify) — the real fact `payment_pending -> payment_failed`'s
+    guard reads. The guard itself derives `failure_reason` from
+    `payment.failure_code`, so nothing needs to be passed through here.
+    Local import: see `_sync_transaction_payment_pending`'s docstring above.
+    """
+    from app.commerce.transaction import service as transaction_service
+
+    transaction_service.sync_transaction_state(
+        db, checkout_id=checkout_id, to_state=transaction_service.STATE_PAYMENT_FAILED
+    )
+
+
+def _sync_transaction_payment_succeeded(db: Session, *, checkout_id: uuid.UUID) -> None:
+    """M9B: `Payment.status` is `success` and `Checkout.status` is
+    `completed` — both real facts already set above. Chains straight on to
+    `order_confirmed`, whose own guard only requires that same
+    `Checkout.status == "completed"` fact — there is no separate real-world
+    event between "payment succeeded" and "order confirmed" for this
+    application to wait for. Local import: see
+    `_sync_transaction_payment_pending`'s docstring above.
+    """
+    from app.commerce.transaction import service as transaction_service
+
+    transaction_service.sync_transaction_state(
+        db, checkout_id=checkout_id, to_state=transaction_service.STATE_PAYMENT_SUCCESS
+    )
+    transaction_service.sync_transaction_state(
+        db, checkout_id=checkout_id, to_state=transaction_service.STATE_ORDER_CONFIRMED
+    )

@@ -42,6 +42,7 @@ from app.commerce.errors import (
     CartNotFoundError,
     CheckoutAlreadyHasTransactionError,
     CheckoutNotFoundError,
+    CommerceError,
     InvalidTransactionTransitionError,
     TransactionInputMismatchError,
     TransactionNotFoundError,
@@ -408,6 +409,61 @@ def create_transaction(
     db.flush()
     db.refresh(transaction)
     return transaction
+
+
+def sync_transaction_state(
+    db: Session,
+    *,
+    checkout_id: uuid.UUID,
+    to_state: str,
+    actor_type: str = ACTOR_SYSTEM,
+    actor_id: str | None = None,
+    reason: str | None = None,
+) -> Transaction | None:
+    """M9B: advance the `Transaction` linked to `checkout_id` (if any) to
+    `to_state`, as a side effect of the real checkout/policy/payment event
+    that just happened — called from `app.commerce.policy.service` and
+    `app.commerce.payment.service` at the points where `PolicyDecision`,
+    `CheckoutAuthorization`, and `Payment` actually change, so the FSM
+    reflects the application's real lifecycle instead of sitting frozen at
+    `checkout_created` (the bug M9B's audit found: nothing outside this
+    module ever called `transition_transaction`).
+
+    This calls `transition_transaction` itself — the exact same guarded,
+    audited state machine `app.commerce.transaction.router` uses, unchanged.
+    It adds no new authority: a transition this rejects (an edge that
+    doesn't exist, or one whose live-state guard doesn't hold) is rejected
+    here exactly as it would be over HTTP, and rejection still writes
+    nothing — no `Transaction` mutation, no `AuditEvent` — the same
+    guarantee `transition_transaction`'s own docstring describes.
+
+    Deliberately silent on `CommerceError`: a checkout with no `Transaction`
+    attached at all is a normal, harmless no-op (only the AI-buyer chat
+    frontend attaches one today, via `POST /api/transactions` right after
+    `create_checkout` — a checkout created any other way simply has nothing
+    for this to advance, the "direct-checkout gap" M9B's audit noted and
+    left unresolved as a separate, larger change), and so is a transition
+    that no longer applies (this sync running twice, e.g. `evaluate_checkout`'s
+    idempotent re-evaluation path, or arriving after the transaction already
+    advanced some other way). The real domain fact this call is trying to
+    record has already happened regardless of whether the `Transaction` row
+    could be updated to match it — a sync failure must never be allowed to
+    fail the checkout/policy/payment action it's attached to.
+    """
+    transaction = repository.get_transaction_by_checkout(db, checkout_id)
+    if transaction is None:
+        return None
+    try:
+        return transition_transaction(
+            db,
+            transaction_id=transaction.id,
+            to_state=to_state,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            reason=reason,
+        )
+    except CommerceError:
+        return None
 
 
 def get_transaction(db: Session, transaction_id: uuid.UUID) -> Transaction:
