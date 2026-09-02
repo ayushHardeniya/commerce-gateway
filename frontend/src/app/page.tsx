@@ -33,9 +33,29 @@ export default function Home() {
   const attemptedCheckouts = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    fetchHealth()
-      .then(() => setApiStatus("online"))
-      .catch(() => setApiStatus("offline"));
+    let cancelled = false;
+
+    function checkHealth() {
+      fetchHealth()
+        .then(() => {
+          if (!cancelled) setApiStatus("online");
+        })
+        .catch(() => {
+          if (!cancelled) setApiStatus("offline");
+        });
+    }
+
+    checkHealth();
+    // A transient Render cold-start failure on the first check shouldn't
+    // permanently strand the badge on "offline" — recheck periodically so
+    // it can recover once the backend is actually warm. 30s keeps this from
+    // polling aggressively.
+    const intervalId = setInterval(checkHealth, 30_000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
   }, []);
 
   useEffect(() => {
@@ -53,6 +73,7 @@ export default function Home() {
 
     try {
       const response = await chatWithAgent(message);
+      setApiStatus("online");
       const linkedTransactionId = await maybeLinkTransaction(
         response.tool_calls,
         attemptedCheckouts.current,
