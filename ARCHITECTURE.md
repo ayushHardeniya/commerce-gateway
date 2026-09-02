@@ -346,7 +346,7 @@ FastAPI application, internally organized into modules by domain concern.
     and on each function call Gemini proposes, validates and executes it
     through the `Tool` contract and returns the structured result to Gemini
     — repeating for at most a small, fixed number of model turns
-    (`max_tool_iterations`, default 6) before failing clearly rather than
+    (`max_tool_iterations`, default 8) before failing clearly rather than
     looping indefinitely. Gemini is only ever given the catalog and
     commerce tools above (`app.agents.tools.DEFAULT_TOOLS`): it has no path
     to inventory mutation, pricing, policy, authorization, or payment

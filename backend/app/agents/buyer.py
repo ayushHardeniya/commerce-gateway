@@ -32,7 +32,7 @@ from app.agents.tools import DEFAULT_TOOLS
 from app.agents.tools.base import Tool
 from app.core.config import Settings, get_settings
 
-DEFAULT_MAX_TOOL_ITERATIONS = 6
+DEFAULT_MAX_TOOL_ITERATIONS = 8
 
 # Sent with every request as `GenerateContentConfig.system_instruction` — the
 # one guardrail this module adds against a real failure mode: the catalog

@@ -228,24 +228,34 @@ def test_chat_exhausts_iteration_limit_when_multi_step_flow_leaves_no_turn_to_an
     """M8C/M9A: pins the exact shape a real live run hit (Scenario G,
     `docs/evaluation/README.md`) — a model making genuine, purposeful
     progress (search, inspect the product, create the cart, add the item,
-    confirm the cart, then checkout — not stuck calling the same tool
-    forever, unlike `test_chat_raises_when_iteration_limit_is_exhausted`
-    above) can still exhaust `max_tool_iterations` at the real default,
-    because a final text-only reply draws from the *same* budget as every
-    tool-calling turn. If a flow legitimately needs exactly
+    fix the quantity, confirm the cart, checkout, then evaluate policy —
+    not stuck calling the same tool forever, unlike
+    `test_chat_raises_when_iteration_limit_is_exhausted` above) can still
+    exhaust `max_tool_iterations` at the real default, because a final
+    text-only reply draws from the *same* budget as every tool-calling
+    turn. If a flow legitimately needs exactly
     `DEFAULT_MAX_TOOL_ITERATIONS` tool calls, there is by construction no
     turn left over for the model to actually answer — this is a real
     product/iteration-budget mismatch to keep visible as a regression, not
     a hypothetical. (M9A raised the default from 4 to 6 after this exact
     mismatch was confirmed live at the old value; the live run itself used
     only 4 tool calls — search, cart, item, checkout — and still exhausted
-    the old budget of 4. This test's flow adds the two other optional,
+    the old budget of 4. That test's flow added the two other optional,
     still-purposeful steps M9A's analysis traced — `get_product` and a
-    `get_cart` confirmation before checkout — to pin the new default's
-    exact boundary at 6.)
+    `get_cart` confirmation before checkout — to pin the boundary at 6.
+    This default was raised again, from 6 to 8, after a real deployed
+    request — "Find me wireless headphones under $50 and buy one" —
+    hit exactly this mismatch in production: a legitimate flow needing a
+    quantity correction (`update_cart_item_quantity`, to land on the one
+    unit actually asked for) and a policy check (`evaluate_checkout_policy`,
+    the one read-only policy tool available) before checkout genuinely
+    needs 8 tool-calling turns, leaving none for a final answer at the old
+    ceiling of 6. This test's flow adds those two steps to pin the new
+    default's exact boundary at 8.)
     """
     product_id = str(uuid.uuid4())
     cart_id = str(uuid.uuid4())
+    checkout_id = str(uuid.uuid4())
     responses = [
         function_call_response("search_catalog", {"query": "wireless headphones"}),
         function_call_response("get_product", {"product_id": product_id}),
@@ -254,8 +264,13 @@ def test_chat_exhausts_iteration_limit_when_multi_step_flow_leaves_no_turn_to_an
             "add_cart_item",
             {"cart_id": cart_id, "product_id": product_id, "quantity": 1},
         ),
+        function_call_response(
+            "update_cart_item_quantity",
+            {"cart_id": cart_id, "item_id": str(uuid.uuid4()), "quantity": 1},
+        ),
         function_call_response("get_cart", {"cart_id": cart_id}),
         function_call_response("create_checkout", {"cart_id": cart_id}),
+        function_call_response("evaluate_checkout_policy", {"checkout_id": checkout_id}),
     ]
     # This scenario is only meaningful if it needs *exactly* the full
     # default budget for tool calls alone, leaving nothing for a final
