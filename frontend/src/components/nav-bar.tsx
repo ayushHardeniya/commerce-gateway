@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { TransactionLookupForm } from "./transaction-lookup-form";
@@ -17,9 +18,21 @@ export function NavBar() {
     <header className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-black/10 bg-white/80 px-4 py-2.5 backdrop-blur-sm sm:px-6 dark:border-white/10 dark:bg-black/80">
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
         <Link href="/" className="flex shrink-0 items-center gap-2">
-          <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
-          <span className="text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-            Commerce Gateway
+          <Image
+            src="/logo-dark-brand-mark.png"
+            alt=""
+            width={240}
+            height={240}
+            priority
+            className="h-5 w-5 shrink-0"
+          />
+          <span className="flex items-baseline gap-1.5">
+            <span className="text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
+              Commerce Gateway
+            </span>
+            <span className="hidden text-[11px] text-zinc-400 sm:inline dark:text-zinc-600">
+              AI-native commerce
+            </span>
           </span>
         </Link>
         <nav className="flex flex-wrap items-center gap-1">

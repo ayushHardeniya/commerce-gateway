@@ -11,6 +11,9 @@ import {
   type ToolCallRecord,
 } from "@/lib/api";
 import { describeError } from "@/components/ui/error-banner";
+import { HowItWorksPanel } from "@/components/how-it-works-panel";
+
+const EXAMPLE_PROMPT = "Find me wireless headphones under $50 and buy one.";
 
 type ChatTurn =
   | { role: "user"; text: string }
@@ -90,69 +93,98 @@ export default function Home() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 py-6 sm:px-6">
-      <div className="mb-4 flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">AI Buyer</h1>
-          <p className="text-sm text-zinc-500 dark:text-zinc-500">
-            Ask it to find and buy something. Every reply below shows the deterministic tool
-            calls behind it — the model never touches policy, payment, or transaction state
-            directly.
+    <>
+      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 py-6 sm:px-6">
+        <section className="mb-6 flex flex-col gap-3 border-b border-black/10 pb-6 dark:border-white/10">
+          <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-600">
+            AI-native commerce
           </p>
-        </div>
-        <span className="mt-0.5 flex shrink-0 items-center gap-1.5 rounded-full border border-black/10 px-2.5 py-1 text-xs dark:border-white/10">
-          <span
-            className={`h-1.5 w-1.5 rounded-full ${
-              apiStatus === "online"
-                ? "bg-emerald-500"
-                : apiStatus === "offline"
-                  ? "bg-rose-500"
-                  : "bg-amber-500"
-            }`}
-          />
-          API {apiStatus}
-        </span>
-      </div>
+          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 sm:text-3xl dark:text-zinc-50">
+            Buy through AI. Safely.
+          </h1>
+          <p className="max-w-xl text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            Commerce Gateway lets AI buyers discover products, prepare checkout, and
+            transact within merchant-defined policies and authorization boundaries.
+          </p>
+          <button
+            type="button"
+            onClick={() => setInput(EXAMPLE_PROMPT)}
+            className="mt-1 flex w-fit max-w-full items-center gap-2 rounded-md border border-black/10 bg-zinc-50 px-3 py-1.5 text-left text-xs transition-colors hover:border-black/20 hover:bg-white dark:border-white/10 dark:bg-zinc-900 dark:hover:border-white/20 dark:hover:bg-zinc-900/70"
+          >
+            <span className="shrink-0 font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-600">
+              Try
+            </span>
+            <span className="truncate font-mono text-zinc-700 dark:text-zinc-300">
+              &ldquo;{EXAMPLE_PROMPT}&rdquo;
+            </span>
+          </button>
+        </section>
 
-      <div
-        ref={logRef}
-        className="flex flex-1 flex-col gap-3 overflow-y-auto rounded-lg border border-black/10 bg-white p-4 dark:border-white/10 dark:bg-zinc-950"
-        style={{ minHeight: "50vh" }}
-      >
-        {turns.length === 0 && (
-          <p className="m-auto max-w-sm text-center text-sm text-zinc-400">
-            Try: &ldquo;Find me a widget under $20 and check out.&rdquo;
-          </p>
-        )}
-        {turns.map((turn, index) => (
-          <ChatBubble key={index} turn={turn} />
-        ))}
-        {sending && (
-          <div className="flex items-center gap-2 self-start rounded-lg bg-zinc-100 px-3 py-2 text-sm text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-400" />
-            Thinking…
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">AI Buyer</h2>
+            <p className="text-sm text-zinc-500 dark:text-zinc-500">
+              Describe what you want to buy. The buyer can discover products, build a
+              cart, prepare checkout, and request authorization when merchant policy
+              requires it.
+            </p>
           </div>
-        )}
+          <span className="mt-0.5 flex shrink-0 items-center gap-1.5 rounded-full border border-black/10 px-2.5 py-1 text-xs dark:border-white/10">
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                apiStatus === "online"
+                  ? "bg-emerald-500"
+                  : apiStatus === "offline"
+                    ? "bg-rose-500"
+                    : "bg-amber-500"
+              }`}
+            />
+            API {apiStatus}
+          </span>
+        </div>
+
+        <div
+          ref={logRef}
+          className="flex flex-1 flex-col gap-3 overflow-y-auto rounded-lg border border-black/10 bg-white p-4 dark:border-white/10 dark:bg-zinc-950"
+          style={{ minHeight: "50vh" }}
+        >
+          {turns.length === 0 && (
+            <p className="m-auto max-w-sm text-center text-sm text-zinc-400">
+              Try: &ldquo;{EXAMPLE_PROMPT}&rdquo;
+            </p>
+          )}
+          {turns.map((turn, index) => (
+            <ChatBubble key={index} turn={turn} />
+          ))}
+          {sending && (
+            <div className="flex items-center gap-2 self-start rounded-lg bg-zinc-100 px-3 py-2 text-sm text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-400" />
+              Thinking…
+            </div>
+          )}
+        </div>
+
+        <form onSubmit={(event) => void handleSend(event)} className="mt-3 flex gap-2">
+          <input
+            type="text"
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            placeholder="Ask the AI buyer to find or purchase something…"
+            disabled={sending}
+            className="flex-1 rounded-md border border-black/10 bg-white px-3 py-2 text-sm text-black disabled:opacity-60 dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-50"
+          />
+          <button
+            type="submit"
+            disabled={sending || !input.trim()}
+            className="rounded-md bg-black px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
+          >
+            Send
+          </button>
+        </form>
       </div>
 
-      <form onSubmit={(event) => void handleSend(event)} className="mt-3 flex gap-2">
-        <input
-          type="text"
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          placeholder="Ask the AI buyer to find or purchase something…"
-          disabled={sending}
-          className="flex-1 rounded-md border border-black/10 bg-white px-3 py-2 text-sm text-black disabled:opacity-60 dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-50"
-        />
-        <button
-          type="submit"
-          disabled={sending || !input.trim()}
-          className="rounded-md bg-black px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
-        >
-          Send
-        </button>
-      </form>
-    </div>
+      <HowItWorksPanel />
+    </>
   );
 }
 
