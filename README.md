@@ -7,7 +7,7 @@
   <a href="https://commerce-gateway.vercel.app/">
     <img src="https://img.shields.io/badge/Live-Demo-0A7B66?style=for-the-badge" alt="Live Demo">
   </a>
-  <a href="">
+  <a href="https://youtu.be/8HhBP9QZB_U">
     <img src="https://img.shields.io/badge/Demo-Video-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="Demo Video">
   </a>
   <a href="https://github.com/ayushHardenIya/EchoWard/blob/main/ARCHITECTURE.md">
